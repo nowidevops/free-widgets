@@ -2,6 +2,8 @@
 
 A production-ready **Instance Health Monitor** widget for the ServiceNow Service Portal. Provides system administrators with real-time visibility into CPU utilization, memory consumption, node health, transaction throughput, database performance, scheduled jobs, and system logs with configurable alerting thresholds.
 
+![Instance Health Monitor Dashboard](screenshot.png)
+
 ---
 
 ## Features
