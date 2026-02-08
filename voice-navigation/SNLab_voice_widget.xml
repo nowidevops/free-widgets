@@ -1,0 +1,2811 @@
+<?xml version="1.0" encoding="UTF-8"?><unload unload_date="2026-02-08 04:20:24">
+<sys_remote_update_set action="INSERT_OR_UPDATE">
+<application display_value="Global">global</application>
+<application_name>Global</application_name>
+<application_scope>global</application_scope>
+<application_version/>
+<collisions/>
+<commit_date/>
+<deleted/>
+<description/>
+<inserted/>
+<name>SNLab_voice_widget</name>
+<origin_sys_id/>
+<parent display_value=""/>
+<release_date/>
+<remote_base_update_set display_value=""/>
+<remote_parent_id/>
+<remote_sys_id>3d36e4379336765013b7326efaba10e2</remote_sys_id>
+<state>loaded</state>
+<summary/>
+<sys_class_name>sys_remote_update_set</sys_class_name>
+<sys_created_by>admin</sys_created_by>
+<sys_created_on>2026-02-08 04:20:23</sys_created_on>
+<sys_id>c5c620b79336765013b7326efaba1048</sys_id>
+<sys_mod_count>0</sys_mod_count>
+<sys_updated_by>admin</sys_updated_by>
+<sys_updated_on>2026-02-08 04:20:23</sys_updated_on>
+<update_set display_value=""/>
+<update_source display_value=""/>
+<updated/>
+</sys_remote_update_set>
+<sys_update_xml action="INSERT_OR_UPDATE">
+<action>INSERT_OR_UPDATE</action>
+<application display_value="Global">global</application>
+<category>customer</category>
+<comments/>
+<name>sp_widget_ca6ddcf393b2765013b7326efaba10bc</name>
+<payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, $timeout, $sce, $window, $location) {
+  var c = this;
+
+  // ============================
+  // State Initialization
+  // ============================
+  c.paletteOpen = false;
+  c.isListening = false;
+  c.isProcessing = false;
+  c.isSearching = false;
+  c.lastStatus = '';
+  c.interimText = '';
+  c.confidence = 0;
+  c.commandQuery = '';
+  c.selectedIndex = 0;
+  c.activeTab = 'commands';
+  c.activeResultId = '';
+  c.srAnnouncement = '';
+  c.tutorialMode = false;
+  c.tutorialStep = 0;
+  c.toastVisible = false;
+  c.toastMessage = '';
+  c.toastType = 'info';
+
+  // Data from server
+  c.allCommands = c.data.commands || [];
+  c.filteredCommands = c.allCommands.slice();
+  c.searchResults = c.data.searchResults || [];
+  c.commandHistory = c.data.commandHistory || [];
+  c.customCommands = [];
+  c.navigationTargets = c.data.navigationTargets || [];
+  c.userPreferences = c.data.userPreferences || {};
+
+  // New custom command model
+  c.newCustomCommand = {
+    phrase: '',
+    action_type: 'navigate',
+    target: ''
+  };
+
+  // Web Speech API references
+  var recognition = null;
+  var audioContext = null;
+  var analyserNode = null;
+  var mediaStream = null;
+  var animationFrameId = null;
+  var searchDebounceTimer = null;
+  var statusResetTimer = null;
+
+  // Languages
+  c.languages = [
+    { code: 'en-US', name: 'English (US)' },
+    { code: 'en-GB', name: 'English (UK)' },
+    { code: 'es-ES', name: 'Spanish' },
+    { code: 'fr-FR', name: 'French' },
+    { code: 'de-DE', name: 'German' },
+    { code: 'ja-JP', name: 'Japanese' },
+    { code: 'zh-CN', name: 'Chinese (Simplified)' },
+    { code: 'pt-BR', name: 'Portuguese (Brazil)' },
+    { code: 'ko-KR', name: 'Korean' },
+    { code: 'it-IT', name: 'Italian' }
+  ];
+
+  // Load preferences from localStorage
+  var savedLang = $window.localStorage.getItem('vn_language');
+  c.selectedLanguage = savedLang || 'en-US';
+
+  var savedCustom = $window.localStorage.getItem('vn_custom_commands');
+  if (savedCustom) {
+    try { c.customCommands = JSON.parse(savedCustom); } catch (e) { c.customCommands = []; }
+  }
+
+  // Tutorial Steps
+  c.tutorialSteps = [
+    {
+      title: 'Welcome to Voice Navigation',
+      body: 'This widget lets you control ServiceNow with your voice or keyboard. You can navigate pages, search data, create records, and more — all hands-free.',
+      practice: null
+    },
+    {
+      title: 'Push-to-Talk',
+      body: 'Click and hold the microphone button in the bottom-right corner to speak a command. Release when done. You can also press and hold the Space bar when the palette is open.',
+      practice: 'Hello'
+    },
+    {
+      title: 'Command Palette',
+      body: 'Press Ctrl+K (or Cmd+K on Mac) to open the command palette. Type or speak any command. Use arrow keys to navigate results and Enter to execute.',
+      practice: null
+    },
+    {
+      title: 'Voice Search',
+      body: 'Search incidents, knowledge articles, catalog items, and users by speaking naturally. Try phrases like "find password reset" or "search incident about email".',
+      practice: 'Search for password reset'
+    },
+    {
+      title: 'Navigation Commands',
+      body: 'Navigate anywhere by saying "go to" followed by the page name. For example, "go to dashboard" or "open my approvals".',
+      practice: 'Go to dashboard'
+    },
+    {
+      title: 'Action Commands',
+      body: 'Perform actions with voice: "create incident", "show my tickets", "open change CHG0012345". The system understands natural language.',
+      practice: 'Create incident'
+    },
+    {
+      title: 'Custom Commands',
+      body: 'Create your own voice shortcuts in the Custom tab. Map any phrase to a URL or portal page for quick access to your most-used pages.',
+      practice: null
+    },
+    {
+      title: 'You\'re Ready!',
+      body: 'You now know the basics. The command palette remembers your history, and you can always access this tutorial again by clicking the help button. Happy navigating!',
+      practice: null
+    }
+  ];
+
+  // ============================
+  // Speech Recognition Setup
+  // ============================
+  function initSpeechRecognition() {
+    var SpeechRecognition = $window.SpeechRecognition || $window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      console.warn('Voice Navigation: Web Speech API not supported in this browser.');
+      return;
+    }
+
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 3;
+    recognition.lang = c.selectedLanguage;
+
+    recognition.onresult = function(event) {
+      var interimTranscript = '';
+      var finalTranscript = '';
+      var topConfidence = 0;
+
+      for (var i = event.resultIndex; i &lt; event.results.length; i++) {
+        var result = event.results[i];
+        if (result[0].confidence &gt; topConfidence) {
+          topConfidence = result[0].confidence;
+        }
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript;
+        } else {
+          interimTranscript += result[0].transcript;
+        }
+      }
+
+      $scope.$apply(function() {
+        c.confidence = topConfidence;
+        if (finalTranscript) {
+          c.interimText = '';
+          c.processVoiceInput(finalTranscript.trim());
+        } else {
+          c.interimText = interimTranscript;
+        }
+      });
+    };
+
+    recognition.onerror = function(event) {
+      $scope.$apply(function() {
+        c.isListening = false;
+        c.isProcessing = false;
+
+        var msg = 'Speech recognition error';
+        switch (event.error) {
+          case 'no-speech':
+            msg = 'No speech detected. Try again.';
+            break;
+          case 'audio-capture':
+            msg = 'No microphone found. Check permissions.';
+            break;
+          case 'not-allowed':
+            msg = 'Microphone access denied. Please allow microphone.';
+            break;
+          case 'network':
+            msg = 'Network error. Check your connection.';
+            break;
+          case 'aborted':
+            return; // intentional abort
+        }
+        c.setStatus('error');
+        c.showToast(msg, 'error');
+        c.announce(msg);
+        stopWaveform();
+      });
+    };
+
+    recognition.onend = function() {
+      $scope.$apply(function() {
+        c.isListening = false;
+        stopWaveform();
+      });
+    };
+
+    recognition.onspeechstart = function() {
+      // speech detected
+    };
+  }
+
+  initSpeechRecognition();
+
+  // ============================
+  // Audio Visualization
+  // ============================
+  function startWaveform() {
+    if (!$window.AudioContext &amp;&amp; !$window.webkitAudioContext) return;
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+      mediaStream = stream;
+      audioContext = new ($window.AudioContext || $window.webkitAudioContext)();
+      var source = audioContext.createMediaStreamSource(stream);
+      analyserNode = audioContext.createAnalyser();
+      analyserNode.fftSize = 256;
+      analyserNode.smoothingTimeConstant = 0.7;
+      source.connect(analyserNode);
+      drawWaveform();
+    }).catch(function(err) {
+      console.warn('Voice Nav: Could not access microphone for waveform:', err);
+    });
+  }
+
+  function drawWaveform() {
+    var canvas = document.getElementById('vn-waveform-canvas');
+    if (!canvas || !analyserNode) return;
+
+    var ctx = canvas.getContext('2d');
+    var bufferLength = analyserNode.frequencyBinCount;
+    var dataArray = new Uint8Array(bufferLength);
+    var WIDTH = canvas.width;
+    var HEIGHT = canvas.height;
+    var barCount = 20;
+    var barWidth = (WIDTH / barCount) - 2;
+
+    function draw() {
+      animationFrameId = requestAnimationFrame(draw);
+      analyserNode.getByteFrequencyData(dataArray);
+
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+      for (var i = 0; i &lt; barCount; i++) {
+        var dataIndex = Math.floor(i * bufferLength / barCount);
+        var value = dataArray[dataIndex];
+        var barHeight = Math.max(3, (value / 255) * HEIGHT * 0.9);
+        var x = i * (barWidth + 2);
+        var y = (HEIGHT - barHeight) / 2;
+
+        var gradient = ctx.createLinearGradient(0, y, 0, y + barHeight);
+        gradient.addColorStop(0, '#3b82f6');
+        gradient.addColorStop(1, '#1d4ed8');
+
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.roundRect(x, y, barWidth, barHeight, 2);
+        ctx.fill();
+      }
+    }
+
+    draw();
+  }
+
+  function stopWaveform() {
+    if (animationFrameId) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(function(track) { track.stop(); });
+      mediaStream = null;
+    }
+    if (audioContext &amp;&amp; audioContext.state !== 'closed') {
+      audioContext.close();
+      audioContext = null;
+    }
+    analyserNode = null;
+  }
+
+  // ============================
+  // Voice Control Methods
+  // ============================
+  c.startListening = function() {
+    if (!recognition) {
+      c.showToast('Speech recognition is not supported in your browser. Please use Chrome or Edge.', 'error');
+      return;
+    }
+    if (c.isListening) return;
+
+    try {
+      recognition.lang = c.selectedLanguage;
+      recognition.start();
+      c.isListening = true;
+      c.isProcessing = false;
+      c.lastStatus = '';
+      c.interimText = '';
+      c.confidence = 0;
+      c.announce('Listening for voice command');
+      startWaveform();
+    } catch (e) {
+      console.error('Voice Nav: Error starting recognition:', e);
+      c.showToast('Could not start voice recognition. Please try again.', 'error');
+    }
+  };
+
+  c.stopListening = function() {
+    if (recognition &amp;&amp; c.isListening) {
+      try {
+        recognition.stop();
+      } catch (e) { /* ignore */ }
+    }
+  };
+
+  c.toggleListeningInPalette = function() {
+    if (c.isListening) {
+      c.stopListening();
+    } else {
+      c.startListening();
+    }
+  };
+
+  c.handleVoiceBtnKey = function(event) {
+    if (event.keyCode === 32) { // Space
+      event.preventDefault();
+      c.startListening();
+    }
+  };
+
+  c.handleVoiceBtnKeyUp = function(event) {
+    if (event.keyCode === 32) { // Space
+      event.preventDefault();
+      c.stopListening();
+    }
+  };
+
+  // ============================
+  // Process Voice Input
+  // ============================
+  c.processVoiceInput = function(text) {
+    c.isProcessing = true;
+    c.announce('Processing command: ' + text);
+
+    if (c.paletteOpen) {
+      c.commandQuery = text;
+      c.onCommandQueryChange();
+      c.isProcessing = false;
+      return;
+    }
+
+    // Try to match against commands
+    var matchedCommand = findBestCommandMatch(text);
+
+    if (matchedCommand) {
+      c.executeCommand(matchedCommand, text);
+    } else {
+      // Fall back to search
+      c.commandQuery = text;
+      c.paletteOpen = true;
+      c.activeTab = 'search';
+      c.performSearch(text);
+      c.isProcessing = false;
+      c.setStatus('success');
+    }
+  };
+
+  // ============================
+  // Fuzzy Matching
+  // ============================
+  function fuzzyScore(needle, haystack) {
+    needle = needle.toLowerCase();
+    haystack = haystack.toLowerCase();
+
+    if (haystack.indexOf(needle) !== -1) return 1.0;
+    if (needle.indexOf(haystack) !== -1) return 0.9;
+
+    var score = 0;
+    var needleIdx = 0;
+    var consecutive = 0;
+
+    for (var i = 0; i &lt; haystack.length &amp;&amp; needleIdx &lt; needle.length; i++) {
+      if (haystack[i] === needle[needleIdx]) {
+        score += 1 + consecutive * 0.5;
+        consecutive++;
+        needleIdx++;
+      } else {
+        consecutive = 0;
+      }
+    }
+
+    if (needleIdx &lt; needle.length * 0.5) return 0;
+    return score / needle.length;
+  }
+
+  function findBestCommandMatch(text) {
+    var allCmds = c.allCommands.concat(
+      c.customCommands.map(function(custom) {
+        return {
+          label: custom.phrase,
+          description: 'Custom: ' + custom.target,
+          patterns: [custom.phrase],
+          action: custom.action_type,
+          action_target: custom.target,
+          category: 'Custom'
+        };
+      })
+    );
+
+    var bestMatch = null;
+    var bestScore = 0;
+    var lowerText = text.toLowerCase();
+
+    allCmds.forEach(function(cmd) {
+      // Check patterns
+      var patterns = cmd.patterns || [cmd.label];
+      patterns.forEach(function(pattern) {
+        var patLower = pattern.toLowerCase();
+        var score = 0;
+
+        // Exact match
+        if (lowerText === patLower) {
+          score = 2.0;
+        }
+        // Contains pattern
+        else if (lowerText.indexOf(patLower) !== -1 || patLower.indexOf(lowerText) !== -1) {
+          score = 1.5;
+        }
+        // Fuzzy match
+        else {
+          score = fuzzyScore(lowerText, patLower);
+        }
+
+        if (score &gt; bestScore &amp;&amp; score &gt; 0.4) {
+          bestScore = score;
+          bestMatch = cmd;
+        }
+      });
+    });
+
+    return bestMatch;
+  }
+
+  // ============================
+  // Command Execution
+  // ============================
+  c.executeCommand = function(cmd, voiceText) {
+    c.isProcessing = false;
+    var actionText = voiceText || cmd.label;
+
+    // Log to history
+    logCommandExecution(actionText, cmd.action, cmd.action_target || cmd.label);
+
+    switch (cmd.action) {
+      case 'navigate':
+        c.setStatus('success');
+        c.showToast('Navigating to ' + (cmd.action_target || cmd.label), 'success');
+        c.announce('Navigating to ' + cmd.label);
+        $timeout(function() {
+          if (cmd.action_target) {
+            $window.location.href = cmd.action_target;
+          }
+        }, 600);
+        break;
+
+      case 'page':
+        c.setStatus('success');
+        c.showToast('Opening ' + cmd.label, 'success');
+        c.announce('Opening page: ' + cmd.label);
+        $timeout(function() {
+          if (cmd.action_target) {
+            $window.location.href = '?id=' + cmd.action_target;
+          }
+        }, 600);
+        break;
+
+      case 'search':
+        c.setStatus('success');
+        c.paletteOpen = true;
+        c.activeTab = 'search';
+        var searchTerm = extractSearchTerm(actionText);
+        c.commandQuery = searchTerm || cmd.action_target || '';
+        c.performSearch(c.commandQuery);
+        break;
+
+      case 'create':
+        c.setStatus('success');
+        c.showToast('Creating ' + (cmd.action_target || 'record'), 'success');
+        c.announce('Creating ' + (cmd.action_target || 'record'));
+        $timeout(function() {
+          if (cmd.action_url) {
+            $window.location.href = cmd.action_url;
+          } else if (cmd.action_target === 'incident') {
+            $window.location.href = '?id=sc_cat_item&amp;sys_id=incident';
+          }
+        }, 600);
+        break;
+
+      case 'open_record':
+        var recordId = extractRecordId(actionText);
+        if (recordId) {
+          c.setStatus('success');
+          c.showToast('Opening record ' + recordId, 'success');
+          c.announce('Opening record ' + recordId);
+          performRecordOpen(recordId);
+        } else {
+          c.setStatus('error');
+          c.showToast('Could not find a record number in your command', 'error');
+        }
+        break;
+
+      default:
+        if (cmd.action_target) {
+          c.setStatus('success');
+          c.showToast('Executing: ' + cmd.label, 'success');
+          $timeout(function() {
+            $window.location.href = cmd.action_target;
+          }, 600);
+        } else {
+          c.setStatus('error');
+          c.showToast('Command recognized but no action configured', 'info');
+        }
+    }
+
+    c.paletteOpen = false;
+  };
+
+  function extractSearchTerm(text) {
+    var prefixes = ['search for', 'search', 'find', 'look for', 'look up', 'show me'];
+    var lower = text.toLowerCase();
+    for (var i = 0; i &lt; prefixes.length; i++) {
+      if (lower.indexOf(prefixes[i]) === 0) {
+        return text.substring(prefixes[i].length).trim();
+      }
+    }
+    return text;
+  }
+
+  function extractRecordId(text) {
+    var patterns = [
+      /\b(INC\d{7,})\b/i,
+      /\b(CHG\d{7,})\b/i,
+      /\b(REQ\d{7,})\b/i,
+      /\b(RITM\d{7,})\b/i,
+      /\b(PRB\d{7,})\b/i,
+      /\b(KB\d{7,})\b/i,
+      /\b(TASK\d{7,})\b/i
+    ];
+    for (var i = 0; i &lt; patterns.length; i++) {
+      var match = text.match(patterns[i]);
+      if (match) return match[1].toUpperCase();
+    }
+    return null;
+  }
+
+  function performRecordOpen(recordId) {
+    var prefix = recordId.substring(0, 3).toUpperCase();
+    var tableMap = {
+      'INC': 'incident',
+      'CHG': 'change_request',
+      'REQ': 'sc_request',
+      'RIT': 'sc_req_item',
+      'PRB': 'problem',
+      'TAS': 'sc_task'
+    };
+    var table = tableMap[prefix] || 'task';
+    $window.location.href = '/nav_to.do?uri=' + table + '.do?sysparm_query=number=' + recordId;
+  }
+
+  function logCommandExecution(commandText, action, target) {
+    // Add to local history
+    c.commandHistory.unshift({
+      command_text: commandText,
+      executed_action: action + ': ' + target,
+      status: 'success',
+      time_ago: 'just now'
+    });
+    if (c.commandHistory.length &gt; 20) {
+      c.commandHistory = c.commandHistory.slice(0, 20);
+    }
+
+    // Log to server
+    c.server.get({
+      action: 'log_command',
+      command_text: commandText,
+      executed_action: action,
+      action_target: target
+    });
+  }
+
+  // ============================
+  // Command Palette
+  // ============================
+  c.openPalette = function() {
+    c.paletteOpen = true;
+    c.commandQuery = '';
+    c.selectedIndex = 0;
+    c.activeTab = 'commands';
+    c.filteredCommands = c.allCommands.slice();
+    c.searchResults = [];
+    c.announce('Command palette opened');
+
+    $timeout(function() {
+      var input = document.getElementById('vn-palette-input');
+      if (input) input.focus();
+    }, 100);
+  };
+
+  c.closePalette = function(event) {
+    if (event &amp;&amp; event.target !== event.currentTarget) return;
+    c.paletteOpen = false;
+    c.commandQuery = '';
+    c.interimText = '';
+    if (c.isListening) c.stopListening();
+    c.announce('Command palette closed');
+  };
+
+  c.setActiveTab = function(tab) {
+    c.activeTab = tab;
+    c.selectedIndex = 0;
+
+    if (tab === 'search' &amp;&amp; c.commandQuery) {
+      c.performSearch(c.commandQuery);
+    }
+  };
+
+  c.onCommandQueryChange = function() {
+    c.selectedIndex = 0;
+
+    // Filter commands
+    if (c.commandQuery &amp;&amp; c.commandQuery.length &gt; 0) {
+      var query = c.commandQuery.toLowerCase();
+      var scored = c.allCommands.map(function(cmd) {
+        var labelScore = fuzzyScore(query, cmd.label);
+        var descScore = fuzzyScore(query, cmd.description || '');
+        var patternScore = 0;
+        if (cmd.patterns) {
+          cmd.patterns.forEach(function(p) {
+            var s = fuzzyScore(query, p);
+            if (s &gt; patternScore) patternScore = s;
+          });
+        }
+        return {
+          cmd: cmd,
+          score: Math.max(labelScore, descScore * 0.8, patternScore)
+        };
+      }).filter(function(item) {
+        return item.score &gt; 0.2;
+      }).sort(function(a, b) {
+        return b.score - a.score;
+      });
+
+      c.filteredCommands = scored.map(function(item) { return item.cmd; });
+    } else {
+      c.filteredCommands = c.allCommands.slice();
+    }
+
+    // Debounced search
+    if (searchDebounceTimer) $timeout.cancel(searchDebounceTimer);
+    if (c.commandQuery &amp;&amp; c.commandQuery.length &gt;= 2) {
+      searchDebounceTimer = $timeout(function() {
+        c.performSearch(c.commandQuery);
+      }, 400);
+    }
+  };
+
+  c.performSearch = function(query) {
+    if (!query || query.length &lt; 2) return;
+    c.isSearching = true;
+    c.searchResults = [];
+
+    c.server.get({
+      action: 'search',
+      query: query
+    }).then(function(response) {
+      c.isSearching = false;
+      if (response.data &amp;&amp; response.data.searchResults) {
+        c.searchResults = response.data.searchResults;
+        c.announce(c.searchResults.length + ' search results found');
+      }
+    }, function() {
+      c.isSearching = false;
+      c.showToast('Search failed. Please try again.', 'error');
+    });
+  };
+
+  c.openSearchResult = function(result) {
+    c.paletteOpen = false;
+    logCommandExecution('Open: ' + result.title, 'navigate', result.url);
+
+    if (result.url) {
+      $window.location.href = result.url;
+    }
+  };
+
+  c.repeatCommand = function(hist) {
+    c.processVoiceInput(hist.command_text);
+  };
+
+  // ============================
+  // Keyboard Navigation
+  // ============================
+  c.handlePaletteKeydown = function(event) {
+    var currentList = [];
+    if (c.activeTab === 'commands') currentList = c.filteredCommands;
+    else if (c.activeTab === 'search') currentList = c.searchResults;
+    else if (c.activeTab === 'history') currentList = c.commandHistory;
+
+    switch (event.keyCode) {
+      case 40: // Down
+        event.preventDefault();
+        if (c.selectedIndex &lt; currentList.length - 1) {
+          c.selectedIndex++;
+        }
+        c.activeResultId = 'vn-result-' + c.selectedIndex;
+        scrollResultIntoView();
+        break;
+
+      case 38: // Up
+        event.preventDefault();
+        if (c.selectedIndex &gt; 0) {
+          c.selectedIndex--;
+        }
+        c.activeResultId = 'vn-result-' + c.selectedIndex;
+        scrollResultIntoView();
+        break;
+
+      case 13: // Enter
+        event.preventDefault();
+        if (currentList[c.selectedIndex]) {
+          if (c.activeTab === 'commands') {
+            c.executeCommand(currentList[c.selectedIndex]);
+          } else if (c.activeTab === 'search') {
+            c.openSearchResult(currentList[c.selectedIndex]);
+          } else if (c.activeTab === 'history') {
+            c.repeatCommand(currentList[c.selectedIndex]);
+          }
+        }
+        break;
+
+      case 27: // Escape
+        event.preventDefault();
+        c.closePalette();
+        break;
+
+      case 9: // Tab — switch tabs
+        event.preventDefault();
+        var tabs = ['commands', 'search', 'history', 'custom'];
+        var currentIdx = tabs.indexOf(c.activeTab);
+        if (event.shiftKey) {
+          c.activeTab = tabs[(currentIdx - 1 + tabs.length) % tabs.length];
+        } else {
+          c.activeTab = tabs[(currentIdx + 1) % tabs.length];
+        }
+        c.selectedIndex = 0;
+        break;
+
+      case 32: // Space — push-to-talk
+        if (!event.target || event.target.tagName !== 'INPUT') {
+          event.preventDefault();
+          c.startListening();
+        }
+        break;
+    }
+  };
+
+  function scrollResultIntoView() {
+    $timeout(function() {
+      var active = document.querySelector('.vn-result-item--active');
+      if (active) {
+        active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }, 50);
+  }
+
+  // Global keyboard shortcut: Ctrl+K / Cmd+K
+  function handleGlobalKeydown(event) {
+    // Ctrl+K or Cmd+K
+    if ((event.ctrlKey || event.metaKey) &amp;&amp; event.keyCode === 75) {
+      event.preventDefault();
+      $scope.$apply(function() {
+        if (c.paletteOpen) {
+          c.closePalette();
+        } else {
+          c.openPalette();
+        }
+      });
+    }
+
+    // Escape to close
+    if (event.keyCode === 27 &amp;&amp; c.paletteOpen) {
+      $scope.$apply(function() {
+        c.closePalette();
+      });
+    }
+  }
+
+  $window.addEventListener('keydown', handleGlobalKeydown);
+
+  // ============================
+  // Highlight Match
+  // ============================
+  c.highlightMatch = function(text, query) {
+    if (!query || !text) return $sce.trustAsHtml(text || '');
+
+    var regex;
+    try {
+      var escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&amp;');
+      regex = new RegExp('(' + escaped + ')', 'gi');
+    } catch (e) {
+      return $sce.trustAsHtml(text);
+    }
+
+    var highlighted = text.replace(regex, '&lt;span class="vn-highlight"&gt;$1&lt;/span&gt;');
+    return $sce.trustAsHtml(highlighted);
+  };
+
+  // ============================
+  // Custom Commands
+  // ============================
+  c.saveCustomCommand = function() {
+    if (!c.newCustomCommand.phrase || !c.newCustomCommand.target) return;
+
+    var newCmd = {
+      phrase: c.newCustomCommand.phrase,
+      action_type: c.newCustomCommand.action_type,
+      target: c.newCustomCommand.target
+    };
+
+    c.customCommands.push(newCmd);
+    $window.localStorage.setItem('vn_custom_commands', JSON.stringify(c.customCommands));
+
+    // Also save to server
+    c.server.get({
+      action: 'save_custom_command',
+      phrase: newCmd.phrase,
+      action_type: newCmd.action_type,
+      target: newCmd.target
+    });
+
+    c.newCustomCommand = { phrase: '', action_type: 'navigate', target: '' };
+    c.showToast('Custom command saved!', 'success');
+    c.announce('Custom command saved: ' + newCmd.phrase);
+  };
+
+  c.deleteCustomCommand = function(custom, index) {
+    c.customCommands.splice(index, 1);
+    $window.localStorage.setItem('vn_custom_commands', JSON.stringify(c.customCommands));
+    c.showToast('Custom command deleted', 'info');
+  };
+
+  // ============================
+  // Language
+  // ============================
+  c.onLanguageChange = function() {
+    $window.localStorage.setItem('vn_language', c.selectedLanguage);
+    if (recognition) {
+      recognition.lang = c.selectedLanguage;
+    }
+    c.showToast('Language changed to ' + c.selectedLanguage, 'info');
+  };
+
+  // ============================
+  // Tutorial
+  // ============================
+  c.startTutorial = function() {
+    c.tutorialMode = true;
+    c.tutorialStep = 0;
+    c.paletteOpen = false;
+    c.announce('Tutorial started. Step 1 of ' + c.tutorialSteps.length);
+  };
+
+  c.nextTutorialStep = function() {
+    if (c.tutorialStep &gt;= c.tutorialSteps.length - 1) {
+      c.endTutorial();
+    } else {
+      c.tutorialStep++;
+      c.announce('Tutorial step ' + (c.tutorialStep + 1) + ': ' + c.tutorialSteps[c.tutorialStep].title);
+    }
+  };
+
+  c.prevTutorialStep = function() {
+    if (c.tutorialStep &gt; 0) {
+      c.tutorialStep--;
+      c.announce('Tutorial step ' + (c.tutorialStep + 1) + ': ' + c.tutorialSteps[c.tutorialStep].title);
+    }
+  };
+
+  c.endTutorial = function() {
+    c.tutorialMode = false;
+    c.announce('Tutorial complete');
+    c.showToast('Tutorial complete! Press Ctrl+K to get started.', 'success');
+  };
+
+  // ============================
+  // Toast &amp; Status Helpers
+  // ============================
+  c.showToast = function(message, type) {
+    c.toastMessage = message;
+    c.toastType = type || 'info';
+    c.toastVisible = true;
+
+    $timeout(function() {
+      c.toastVisible = false;
+    }, 3500);
+  };
+
+  c.setStatus = function(status) {
+    c.lastStatus = status;
+    if (statusResetTimer) $timeout.cancel(statusResetTimer);
+    statusResetTimer = $timeout(function() {
+      c.lastStatus = '';
+    }, 2000);
+  };
+
+  c.announce = function(message) {
+    c.srAnnouncement = '';
+    $timeout(function() {
+      c.srAnnouncement = message;
+    }, 100);
+  };
+
+  // ============================
+  // Cleanup
+  // ============================
+  $scope.$on('$destroy', function() {
+    $window.removeEventListener('keydown', handleGlobalKeydown);
+    stopWaveform();
+    if (recognition) {
+      try { recognition.abort(); } catch (e) { /* ignore */ }
+    }
+    if (searchDebounceTimer) $timeout.cancel(searchDebounceTimer);
+    if (statusResetTimer) $timeout.cancel(statusResetTimer);
+  });
+
+  // ============================
+  // Init: Show tutorial for first-time users
+  // ============================
+  $timeout(function() {
+    var hasSeenTutorial = $window.localStorage.getItem('vn_tutorial_done');
+    if (!hasSeenTutorial) {
+      c.startTutorial();
+      $window.localStorage.setItem('vn_tutorial_done', 'true');
+    }
+  }, 1000);
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* ============================================================
+   Voice-Controlled Navigation Widget - Production CSS
+   ============================================================ */
+
+.voice-nav-widget {
+  /* CSS Variables scoped to widget */
+  --vn-primary: #2563eb;
+  --vn-primary-light: #3b82f6;
+  --vn-primary-dark: #1d4ed8;
+  --vn-success: #10b981;
+  --vn-warning: #f59e0b;
+  --vn-error: #ef4444;
+  --vn-gray-50: #f9fafb;
+  --vn-gray-100: #f3f4f6;
+  --vn-gray-200: #e5e7eb;
+  --vn-gray-300: #d1d5db;
+  --vn-gray-400: #9ca3af;
+  --vn-gray-500: #6b7280;
+  --vn-gray-600: #4b5563;
+  --vn-gray-700: #374151;
+  --vn-gray-800: #1f2937;
+  --vn-gray-900: #111827;
+  --vn-glass-bg: rgba(17, 24, 39, 0.88);
+  --vn-glass-border: rgba(255, 255, 255, 0.1);
+  --vn-radius-sm: 6px;
+  --vn-radius-md: 10px;
+  --vn-radius-lg: 16px;
+  --vn-radius-full: 9999px;
+  --vn-shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.5);
+  --vn-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.3);
+  --vn-transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --vn-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  position: relative;
+  font-family: var(--vn-font-family);
+  z-index: 10000;
+}
+
+/* Screen Reader Only */
+.voice-nav-widget .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ============================================================
+   Voice Activation Button
+   ============================================================ */
+
+.voice-nav-widget .vn-voice-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--vn-radius-full);
+  border: none;
+  background: var(--vn-gray-700);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--vn-transition);
+  z-index: 10001;
+  box-shadow: var(--vn-shadow-md);
+  outline: none;
+}
+
+.voice-nav-widget .vn-voice-btn:hover {
+  background: var(--vn-gray-600);
+  transform: scale(1.08);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+
+.voice-nav-widget .vn-voice-btn:focus-visible {
+  box-shadow: 0 0 0 3px var(--vn-primary), 0 0 0 6px rgba(37, 99, 235, 0.3);
+}
+
+.voice-nav-widget .vn-voice-btn--listening {
+  background: var(--vn-primary);
+  transform: scale(1.1);
+}
+
+.voice-nav-widget .vn-voice-btn--processing {
+  background: var(--vn-warning);
+}
+
+.voice-nav-widget .vn-voice-btn--success {
+  background: var(--vn-success);
+}
+
+.voice-nav-widget .vn-voice-btn--error {
+  background: var(--vn-error);
+}
+
+.voice-nav-widget .vn-voice-btn__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 2;
+}
+
+.voice-nav-widget .vn-mic-active {
+  animation: vn-mic-breathe 1s ease-in-out infinite;
+}
+
+@keyframes vn-mic-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+}
+
+.voice-nav-widget .vn-spinner-icon {
+  animation: vn-spin 1s linear infinite;
+}
+
+@keyframes vn-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Pulse rings */
+.voice-nav-widget .vn-voice-btn__pulse {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--vn-radius-full);
+  background: var(--vn-primary);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(1);
+  animation: vn-pulse-ring 1.5s ease-out infinite;
+  pointer-events: none;
+}
+
+.voice-nav-widget .vn-voice-btn__pulse--delayed {
+  animation-delay: 0.5s;
+}
+
+@keyframes vn-pulse-ring {
+  0% {
+    opacity: 0.5;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(2.2);
+  }
+}
+
+/* ============================================================
+   Waveform Visualization
+   ============================================================ */
+
+.voice-nav-widget .vn-waveform-container {
+  position: fixed;
+  bottom: 90px;
+  right: 8px;
+  width: 120px;
+  height: 60px;
+  z-index: 10001;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.voice-nav-widget .vn-waveform-canvas {
+  width: 120px;
+  height: 60px;
+  border-radius: var(--vn-radius-md);
+  background: rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(8px);
+}
+
+/* ============================================================
+   Speech Preview
+   ============================================================ */
+
+.voice-nav-widget .vn-speech-preview {
+  position: fixed;
+  bottom: 90px;
+  right: 140px;
+  background: var(--vn-glass-bg);
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: var(--vn-radius-md);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--vn-glass-border);
+  max-width: 300px;
+  z-index: 10001;
+  animation: vn-fade-in 0.2s ease-out;
+  font-size: 14px;
+}
+
+.voice-nav-widget .vn-speech-preview__text {
+  display: block;
+  font-style: italic;
+  color: var(--vn-gray-200);
+}
+
+.voice-nav-widget .vn-speech-preview__confidence {
+  display: block;
+  font-size: 11px;
+  color: var(--vn-gray-400);
+  margin-top: 2px;
+}
+
+@keyframes vn-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ============================================================
+   Command Palette Overlay
+   ============================================================ */
+
+.voice-nav-widget .vn-palette-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 10002;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  animation: vn-overlay-in 0.15s ease-out;
+}
+
+@keyframes vn-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.voice-nav-widget .vn-palette {
+  width: 100%;
+  max-width: 600px;
+  background: var(--vn-glass-bg);
+  border: 1px solid var(--vn-glass-border);
+  border-radius: var(--vn-radius-lg);
+  box-shadow: var(--vn-shadow-lg);
+  overflow: hidden;
+  animation: vn-palette-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+}
+
+@keyframes vn-palette-in {
+  from { opacity: 0; transform: scale(0.95) translateY(-20px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* Palette Header */
+.voice-nav-widget .vn-palette__header {
+  padding: 16px 16px 8px;
+  border-bottom: 1px solid var(--vn-glass-border);
+}
+
+.voice-nav-widget .vn-palette__input-wrap {
+  display: flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--vn-radius-md);
+  padding: 0 12px;
+  border: 1px solid transparent;
+  transition: border-color var(--vn-transition);
+}
+
+.voice-nav-widget .vn-palette__input-wrap:focus-within {
+  border-color: var(--vn-primary);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.voice-nav-widget .vn-palette__search-icon {
+  flex-shrink: 0;
+  color: var(--vn-gray-400);
+  margin-right: 8px;
+}
+
+.voice-nav-widget .vn-palette__input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-size: 16px;
+  padding: 12px 0;
+  outline: none;
+  font-family: var(--vn-font-family);
+}
+
+.voice-nav-widget .vn-palette__input::placeholder {
+  color: var(--vn-gray-500);
+}
+
+.voice-nav-widget .vn-palette__voice-toggle {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  color: var(--vn-gray-400);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--vn-radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--vn-transition);
+}
+
+.voice-nav-widget .vn-palette__voice-toggle:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.voice-nav-widget .vn-palette__voice-toggle.vn-active {
+  background: var(--vn-primary);
+  color: #fff;
+  animation: vn-mic-breathe 1s ease-in-out infinite;
+}
+
+.voice-nav-widget .vn-palette__voice-toggle:focus-visible {
+  box-shadow: 0 0 0 2px var(--vn-primary);
+}
+
+.voice-nav-widget .vn-palette__help-text {
+  font-size: 11px;
+  color: var(--vn-gray-500);
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.voice-nav-widget .vn-palette__help-text kbd {
+  margin: 0 1px;
+}
+
+.voice-nav-widget .vn-listening-indicator {
+  color: var(--vn-primary-light);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.voice-nav-widget .vn-listening-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--vn-radius-full);
+  background: var(--vn-primary);
+  animation: vn-blink 1s ease-in-out infinite;
+}
+
+@keyframes vn-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* Language Bar */
+.voice-nav-widget .vn-palette__lang-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--vn-glass-border);
+  font-size: 12px;
+}
+
+.voice-nav-widget .vn-palette__lang-label {
+  color: var(--vn-gray-400);
+  white-space: nowrap;
+}
+
+.voice-nav-widget .vn-palette__lang-select {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--vn-glass-border);
+  color: var(--vn-gray-200);
+  padding: 4px 8px;
+  border-radius: var(--vn-radius-sm);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+
+.voice-nav-widget .vn-palette__lang-select:focus-visible {
+  box-shadow: 0 0 0 2px var(--vn-primary);
+}
+
+.voice-nav-widget .vn-palette__tutorial-btn {
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--vn-glass-border);
+  color: var(--vn-gray-300);
+  padding: 4px 10px;
+  border-radius: var(--vn-radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all var(--vn-transition);
+}
+
+.voice-nav-widget .vn-palette__tutorial-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.voice-nav-widget .vn-palette__tutorial-btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--vn-primary);
+}
+
+/* Tabs */
+.voice-nav-widget .vn-palette__tabs {
+  display: flex;
+  padding: 0 16px;
+  gap: 2px;
+  border-bottom: 1px solid var(--vn-glass-border);
+}
+
+.voice-nav-widget .vn-palette__tab {
+  background: none;
+  border: none;
+  color: var(--vn-gray-400);
+  padding: 10px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all var(--vn-transition);
+  font-family: var(--vn-font-family);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.voice-nav-widget .vn-palette__tab:hover {
+  color: var(--vn-gray-200);
+}
+
+.voice-nav-widget .vn-palette__tab--active {
+  color: #fff;
+  border-bottom-color: var(--vn-primary);
+}
+
+.voice-nav-widget .vn-palette__tab:focus-visible {
+  outline: 2px solid var(--vn-primary);
+  outline-offset: -2px;
+  border-radius: var(--vn-radius-sm);
+}
+
+.voice-nav-widget .vn-badge {
+  background: var(--vn-primary);
+  color: #fff;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--vn-radius-full);
+  font-weight: 600;
+}
+
+/* Results Area */
+.voice-nav-widget .vn-palette__results {
+  overflow-y: auto;
+  max-height: 45vh;
+  padding: 8px;
+  flex: 1;
+}
+
+.voice-nav-widget .vn-palette__group-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vn-gray-500);
+  padding: 6px 8px 4px;
+}
+
+/* Result Items */
+.voice-nav-widget .vn-result-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--vn-radius-sm);
+  cursor: pointer;
+  transition: background var(--vn-transition);
+  color: var(--vn-gray-200);
+}
+
+.voice-nav-widget .vn-result-item:hover,
+.voice-nav-widget .vn-result-item--active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.voice-nav-widget .vn-result-item__icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: var(--vn-radius-sm);
+  font-size: 16px;
+}
+
+.voice-nav-widget .vn-result-item__content {
+  flex: 1;
+  min-width: 0;
+}
+
+.voice-nav-widget .vn-result-item__title {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.voice-nav-widget .vn-result-item__desc {
+  display: block;
+  font-size: 12px;
+  color: var(--vn-gray-400);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.voice-nav-widget .vn-result-item__shortcut {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.voice-nav-widget .vn-result-item__category {
+  font-size: 11px;
+  color: var(--vn-gray-500);
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 2px 8px;
+  border-radius: var(--vn-radius-sm);
+}
+
+.voice-nav-widget .vn-result-item__type-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--vn-radius-full);
+  flex-shrink: 0;
+}
+
+.voice-nav-widget .vn-result-item__type-badge--incident {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+}
+
+.voice-nav-widget .vn-result-item__type-badge--knowledge {
+  background: rgba(37, 99, 235, 0.15);
+  color: #93c5fd;
+}
+
+.voice-nav-widget .vn-result-item__type-badge--catalog {
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+}
+
+.voice-nav-widget .vn-result-item__type-badge--user {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fcd34d;
+}
+
+.voice-nav-widget .vn-result-item__repeat-btn,
+.voice-nav-widget .vn-result-item__delete-btn {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  color: var(--vn-gray-400);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--vn-radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--vn-transition);
+}
+
+.voice-nav-widget .vn-result-item__repeat-btn:hover {
+  background: var(--vn-primary);
+  color: #fff;
+}
+
+.voice-nav-widget .vn-result-item__delete-btn:hover {
+  background: var(--vn-error);
+  color: #fff;
+}
+
+.voice-nav-widget .vn-result-item__repeat-btn:focus-visible,
+.voice-nav-widget .vn-result-item__delete-btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--vn-primary);
+}
+
+/* Kbd */
+.voice-nav-widget .vn-kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-family: var(--vn-font-family);
+  color: var(--vn-gray-300);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  line-height: 1.3;
+}
+
+/* Empty State */
+.voice-nav-widget .vn-palette__empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--vn-gray-400);
+  font-size: 14px;
+}
+
+.voice-nav-widget .vn-palette__empty-hint {
+  font-size: 12px;
+  color: var(--vn-gray-500);
+  margin-top: 4px;
+}
+
+/* Search Loading */
+.voice-nav-widget .vn-search-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--vn-gray-400);
+  font-size: 13px;
+}
+
+.voice-nav-widget .vn-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--vn-primary);
+  border-radius: var(--vn-radius-full);
+  animation: vn-spin 0.7s linear infinite;
+}
+
+/* Palette Footer */
+.voice-nav-widget .vn-palette__footer {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--vn-glass-border);
+  font-size: 11px;
+  color: var(--vn-gray-500);
+  flex-wrap: wrap;
+}
+
+.voice-nav-widget .vn-palette__footer-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   Custom Command Form
+   ============================================================ */
+
+.voice-nav-widget .vn-custom-form {
+  padding: 8px;
+}
+
+.voice-nav-widget .vn-custom-form__row {
+  margin-bottom: 10px;
+}
+
+.voice-nav-widget .vn-custom-form__label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--vn-gray-300);
+  margin-bottom: 4px;
+}
+
+.voice-nav-widget .vn-custom-form__input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--vn-glass-border);
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: var(--vn-radius-sm);
+  font-size: 13px;
+  outline: none;
+  font-family: var(--vn-font-family);
+  transition: border-color var(--vn-transition);
+  box-sizing: border-box;
+}
+
+.voice-nav-widget .vn-custom-form__input:focus {
+  border-color: var(--vn-primary);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.voice-nav-widget .vn-custom-form__submit {
+  width: 100%;
+  background: var(--vn-primary);
+  color: #fff;
+  border: none;
+  padding: 10px;
+  border-radius: var(--vn-radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--vn-transition);
+  font-family: var(--vn-font-family);
+}
+
+.voice-nav-widget .vn-custom-form__submit:hover {
+  background: var(--vn-primary-dark);
+}
+
+.voice-nav-widget .vn-custom-form__submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.voice-nav-widget .vn-custom-form__submit:focus-visible {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.4);
+}
+
+/* ============================================================
+   Tutorial Overlay
+   ============================================================ */
+
+.voice-nav-widget .vn-tutorial-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 10003;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  animation: vn-overlay-in 0.2s ease-out;
+}
+
+.voice-nav-widget .vn-tutorial-card {
+  background: var(--vn-gray-800);
+  border: 1px solid var(--vn-glass-border);
+  border-radius: var(--vn-radius-lg);
+  max-width: 460px;
+  width: 100%;
+  padding: 24px;
+  box-shadow: var(--vn-shadow-lg);
+  animation: vn-palette-in 0.25s ease-out;
+}
+
+.voice-nav-widget .vn-tutorial-card__progress {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+
+.voice-nav-widget .vn-tutorial-card__progress-bar {
+  height: 100%;
+  background: var(--vn-primary);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.voice-nav-widget .vn-tutorial-card__title {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.voice-nav-widget .vn-tutorial-card__body {
+  color: var(--vn-gray-300);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0 0 16px;
+}
+
+.voice-nav-widget .vn-tutorial-card__practice {
+  background: rgba(37, 99, 235, 0.1);
+  border: 1px solid rgba(37, 99, 235, 0.3);
+  border-radius: var(--vn-radius-md);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.voice-nav-widget .vn-tutorial-card__practice-label {
+  font-size: 12px;
+  color: var(--vn-gray-400);
+  margin: 0 0 4px;
+}
+
+.voice-nav-widget .vn-tutorial-card__practice-text {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--vn-primary-light);
+  margin: 0;
+  font-style: italic;
+}
+
+.voice-nav-widget .vn-tutorial-card__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.voice-nav-widget .vn-tutorial-card__step-count {
+  text-align: center;
+  font-size: 12px;
+  color: var(--vn-gray-500);
+  margin: 12px 0 0;
+}
+
+/* Buttons */
+.voice-nav-widget .vn-btn {
+  padding: 8px 18px;
+  border-radius: var(--vn-radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: all var(--vn-transition);
+  font-family: var(--vn-font-family);
+}
+
+.voice-nav-widget .vn-btn--primary {
+  background: var(--vn-primary);
+  color: #fff;
+}
+
+.voice-nav-widget .vn-btn--primary:hover {
+  background: var(--vn-primary-dark);
+}
+
+.voice-nav-widget .vn-btn--secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--vn-gray-300);
+}
+
+.voice-nav-widget .vn-btn--secondary:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+.voice-nav-widget .vn-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.voice-nav-widget .vn-btn:focus-visible {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.4);
+}
+
+/* ============================================================
+   Toast Notification
+   ============================================================ */
+
+.voice-nav-widget .vn-toast {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 20px;
+  border-radius: var(--vn-radius-md);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 10004;
+  animation: vn-toast-in 0.3s ease-out;
+  box-shadow: var(--vn-shadow-md);
+  color: #fff;
+}
+
+.voice-nav-widget .vn-toast--success {
+  background: var(--vn-success);
+}
+
+.voice-nav-widget .vn-toast--error {
+  background: var(--vn-error);
+}
+
+.voice-nav-widget .vn-toast--info {
+  background: var(--vn-primary);
+}
+
+.voice-nav-widget .vn-toast__icon {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+@keyframes vn-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* ============================================================
+   Highlight Match
+   ============================================================ */
+
+.voice-nav-widget .vn-highlight {
+  color: var(--vn-primary-light);
+  font-weight: 700;
+  background: rgba(37, 99, 235, 0.15);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* ============================================================
+   Responsive Design
+   ============================================================ */
+
+@media (max-width: 768px) {
+  .voice-nav-widget .vn-voice-btn {
+    width: 64px;
+    height: 64px;
+    bottom: 16px;
+    right: 16px;
+  }
+
+  .voice-nav-widget .vn-palette-overlay {
+    padding-top: 0;
+    align-items: flex-start;
+  }
+
+  .voice-nav-widget .vn-palette {
+    max-width: 100%;
+    border-radius: 0 0 var(--vn-radius-lg) var(--vn-radius-lg);
+    max-height: 80vh;
+  }
+
+  .voice-nav-widget .vn-palette__input {
+    font-size: 18px;
+  }
+
+  .voice-nav-widget .vn-palette__footer {
+    gap: 8px;
+    font-size: 10px;
+  }
+
+  .voice-nav-widget .vn-palette__tabs {
+    overflow-x: auto;
+    gap: 0;
+  }
+
+  .voice-nav-widget .vn-palette__tab {
+    padding: 10px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .voice-nav-widget .vn-speech-preview {
+    right: 16px;
+    bottom: 90px;
+    left: 16px;
+    max-width: none;
+  }
+
+  .voice-nav-widget .vn-waveform-container {
+    right: 50%;
+    transform: translateX(50%);
+    bottom: 96px;
+  }
+
+  .voice-nav-widget .vn-tutorial-card {
+    margin: 16px;
+    padding: 16px;
+  }
+
+  .voice-nav-widget .vn-result-item__shortcut {
+    display: none;
+  }
+
+  .voice-nav-widget .vn-result-item__category {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .voice-nav-widget .vn-palette__footer {
+    display: none;
+  }
+
+  .voice-nav-widget .vn-palette__lang-bar {
+    flex-wrap: wrap;
+  }
+
+  .voice-nav-widget .vn-tutorial-card__actions {
+    flex-direction: column;
+  }
+
+  .voice-nav-widget .vn-btn {
+    width: 100%;
+    text-align: center;
+  }
+}
+
+/* High contrast / forced colors */
+@media (forced-colors: active) {
+  .voice-nav-widget .vn-voice-btn {
+    border: 2px solid ButtonText;
+  }
+
+  .voice-nav-widget .vn-result-item--active {
+    outline: 2px solid Highlight;
+  }
+
+  .voice-nav-widget .vn-palette__input {
+    border: 1px solid ButtonText;
+  }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .voice-nav-widget .vn-voice-btn__pulse,
+  .voice-nav-widget .vn-mic-active,
+  .voice-nav-widget .vn-spinner-icon,
+  .voice-nav-widget .vn-listening-dot {
+    animation: none;
+  }
+
+  .voice-nav-widget .vn-palette,
+  .voice-nav-widget .vn-palette-overlay,
+  .voice-nav-widget .vn-toast,
+  .voice-nav-widget .vn-speech-preview {
+    animation: none;
+  }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description&gt;Widget Name: Voice-Controlled Navigation Widget
+
+Purpose: Production-ready Service Portal widget enabling voice-controlled portal navigation with speech-to-action command palette, voice search across &lt;/description&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;false&lt;/has_preview&gt;&lt;id&gt;voice_controlled_navigation_wid_d447c5c3&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;Voice-Controlled Navigation Widget&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;true&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+  // ============================
+  // Handle AJAX actions from client.
+  // ============================
+  if (input &amp;&amp; input.action) {
+    switch (input.action) {
+      case 'search':
+        data.searchResults = performGlobalSearch(input.query || '');
+        return;
+
+      case 'log_command':
+        logVoiceCommand(input.command_text, input.executed_action, input.action_target);
+        return;
+
+      case 'save_custom_command':
+        saveCustomVoiceCommand(input.phrase, input.action_type, input.target);
+        return;
+    }
+  }
+
+  // ============================
+  // Initial Data Load
+  // ============================
+  data.commands = getVoiceCommands();
+  data.navigationTargets = getNavigationTargets();
+  data.commandHistory = getCommandHistory();
+  data.searchResults = [];
+  data.userPreferences = getUserPreferences();
+
+  // ============================
+  // Get Voice Commands
+  // ============================
+  function getVoiceCommands() {
+    var commands = [];
+
+    // Try to load from custom voice_command table
+    try {
+      var grCmd = new GlideRecord('x_voice_command');
+      if (grCmd.isValid()) {
+        grCmd.addQuery('active', true);
+        grCmd.orderBy('order');
+        grCmd.setLimit(100);
+        grCmd.query();
+        while (grCmd.next()) {
+          var patterns = [];
+          var patternStr = grCmd.getValue('patterns') || '';
+          if (patternStr) {
+            patterns = patternStr.split(',').map(function(p) { return p.trim(); });
+          }
+          commands.push({
+            sys_id: grCmd.getUniqueValue(),
+            label: grCmd.getValue('label') || '',
+            description: grCmd.getValue('description') || '',
+            action: grCmd.getValue('action_type') || 'navigate',
+            action_target: grCmd.getValue('action_target') || '',
+            action_url: grCmd.getValue('action_url') || '',
+            patterns: patterns,
+            category: grCmd.getValue('category') || 'General',
+            icon: grCmd.getValue('icon') || '',
+            shortcut: grCmd.getValue('keyboard_shortcut') || ''
+          });
+        }
+      }
+    } catch (e) {
+      // Table may not exist, use defaults
+    }
+
+    // Add default built-in commands if no custom ones or to supplement
+    var defaultCommands = [
+      {
+        label: 'Go to Dashboard',
+        description: 'Navigate to the main Service Portal dashboard',
+        action: 'page',
+        action_target: 'index',
+        patterns: ['go to dashboard', 'open dashboard', 'show dashboard', 'home page', 'go home'],
+        category: 'Navigation',
+        icon: ']]&gt;🏠&lt;![CDATA[',
+        shortcut: 'Ctrl+H'
+      },
+      {
+        label: 'Show My Incidents',
+        description: 'View all incidents assigned to you',
+        action: 'page',
+        action_target: 'my_incidents',
+        patterns: ['show my incidents', 'my incidents', 'my tickets', 'show my tickets', 'assigned to me'],
+        category: 'Navigation',
+        icon: ']]&gt;🔥&lt;![CDATA[',
+        shortcut: 'Ctrl+I'
+      },
+      {
+        label: 'Show My Approvals',
+        description: 'View pending approvals',
+        action: 'page',
+        action_target: 'approvals',
+        patterns: ['show my approvals', 'my approvals', 'pending approvals', 'open approvals'],
+        category: 'Navigation',
+        icon: '✅',
+        shortcut: 'Ctrl+A'
+      },
+      {
+        label: 'Create Incident',
+        description: 'Create a new incident ticket',
+        action: 'navigate',
+        action_target: '?id=sc_cat_item&amp;sys_id=incident',
+        patterns: ['create incident', 'new incident', 'report an issue', 'report issue', 'file a ticket', 'create ticket'],
+        category: 'Actions',
+        icon: '➕',
+        shortcut: 'Ctrl+N'
+      },
+      {
+        label: 'Service Catalog',
+        description: 'Browse the service catalog',
+        action: 'page',
+        action_target: 'sc_home',
+        patterns: ['service catalog', 'open catalog', 'browse catalog', 'show catalog', 'request something'],
+        category: 'Navigation',
+        icon: ']]&gt;🛒&lt;![CDATA[',
+        shortcut: ''
+      },
+      {
+        label: 'Knowledge Base',
+        description: 'Search knowledge articles',
+        action: 'page',
+        action_target: 'kb_home',
+        patterns: ['knowledge base', 'knowledge articles', 'open knowledge', 'search knowledge', 'help articles'],
+        category: 'Navigation',
+        icon: ']]&gt;📖&lt;![CDATA[',
+        shortcut: ''
+      },
+      {
+        label: 'My Profile',
+        description: 'View and edit your profile',
+        action: 'page',
+        action_target: 'user_profile',
+        patterns: ['my profile', 'show my profile', 'edit profile', 'open profile', 'account settings'],
+        category: 'Navigation',
+        icon: ']]&gt;👤&lt;![CDATA[',
+        shortcut: ''
+      },
+      {
+        label: 'Search',
+        description: 'Search across ServiceNow',
+        action: 'search',
+        action_target: '',
+        patterns: ['search for', 'find', 'look for', 'look up', 'search'],
+        category: 'Actions',
+        icon: ']]&gt;🔍&lt;![CDATA[',
+        shortcut: ''
+      },
+      {
+        label: 'Open Record',
+        description: 'Open a specific record by number (e.g., INC0012345)',
+        action: 'open_record',
+        action_target: '',
+        patterns: ['open record', 'open incident', 'open change', 'open request', 'go to record'],
+        category: 'Actions',
+        icon: ']]&gt;📋&lt;![CDATA[',
+        shortcut: ''
+      },
+      {
+        label: 'My Requests',
+        description: 'View your submitted requests',
+        action: 'page',
+        action_target: 'requests',
+        patterns: ['my requests', 'show requests', 'submitted requests', 'open requests'],
+        category: 'Navigation',
+        icon: ']]&gt;📝&lt;![CDATA[',
+        shortcut: ''
+      },
+      {
+        label: 'Change Calendar',
+        description: 'View the change management calendar',
+        action: 'navigate',
+        action_target: '/change_calendar.do',
+        patterns: ['change calendar', 'show changes', 'upcoming changes'],
+        category: 'Navigation',
+        icon: ']]&gt;📅&lt;![CDATA[',
+        shortcut: ''
+      },
+      {
+        label: 'Logout',
+        description: 'Sign out of ServiceNow',
+        action: 'navigate',
+        action_target: '/logout.do',
+        patterns: ['logout', 'log out', 'sign out', 'sign off'],
+        category: 'System',
+        icon: ']]&gt;🚪&lt;![CDATA[',
+        shortcut: ''
+      }
+    ];
+
+    // Merge: add defaults that don't overlap with custom
+    var existingLabels = {};
+    commands.forEach(function(cmd) { existingLabels[cmd.label.toLowerCase()] = true; });
+    defaultCommands.forEach(function(defCmd) {
+      if (!existingLabels[defCmd.label.toLowerCase()]) {
+        commands.push(defCmd);
+      }
+    });
+
+    return commands;
+  }
+
+  // ============================
+  // Get Navigation Targets
+  // ============================
+  function getNavigationTargets() {
+    var targets = [];
+
+    // Query sp_page for portal pages
+    var grPage = new GlideRecord('sp_page');
+    grPage.addQuery('public', true);
+    grPage.setLimit(50);
+    grPage.orderBy('title');
+    grPage.query();
+    while (grPage.next()) {
+      targets.push({
+        sys_id: grPage.getUniqueValue(),
+        title: grPage.getValue('title') || grPage.getValue('id') || '',
+        page_id: grPage.getValue('id') || '',
+        url: '?id=' + (grPage.getValue('id') || '')
+      });
+    }
+
+    return targets;
+  }
+
+  // ============================
+  // Global Search
+  // ============================
+  function performGlobalSearch(query) {
+    var results = [];
+    if (!query || query.length &lt; 2) return results;
+
+    var encodedQuery = query.toString().trim();
+
+    // Search Incidents
+    try {
+      var grInc = new GlideRecord('incident');
+      grInc.addQuery('short_description', 'CONTAINS', encodedQuery)
+        .addOrCondition('number', 'CONTAINS', encodedQuery)
+        .addOrCondition('description', 'CONTAINS', encodedQuery);
+      grInc.setLimit(5);
+      grInc.orderByDesc('sys_created_on');
+      grInc.query();
+      while (grInc.next()) {
+        results.push({
+          type: 'incident',
+          title: grInc.getValue('number') + ': ' + grInc.getValue('short_description'),
+          description: 'Priority: ' + grInc.getDisplayValue('priority') + ' | State: ' + grInc.getDisplayValue('state') + ' | Assigned: ' + grInc.getDisplayValue('assigned_to'),
+          url: '?id=ticket&amp;table=incident&amp;sys_id=' + grInc.getUniqueValue(),
+          sys_id: grInc.getUniqueValue()
+        });
+      }
+    } catch (e) { /* table access error */ }
+
+    // Search Knowledge Articles
+    try {
+      var grKB = new GlideRecord('kb_knowledge');
+      grKB.addQuery('workflow_state', 'published');
+      grKB.addQuery('short_description', 'CONTAINS', encodedQuery)
+        .addOrCondition('text', 'CONTAINS', encodedQuery)
+        .addOrCondition('number', 'CONTAINS', encodedQuery);
+      grKB.setLimit(5);
+      grKB.orderByDesc('sys_view_count');
+      grKB.query();
+      while (grKB.next()) {
+        results.push({
+          type: 'knowledge',
+          title: grKB.getValue('number') + ': ' + grKB.getValue('short_description'),
+          description: 'Category: ' + grKB.getDisplayValue('kb_category') + ' | Views: ' + (grKB.getValue('sys_view_count') || 0),
+          url: '?id=kb_article&amp;sys_id=' + grKB.getUniqueValue(),
+          sys_id: grKB.getUniqueValue()
+        });
+      }
+    } catch (e) { /* table access error */ }
+
+    // Search Catalog Items
+    try {
+      var grCat = new GlideRecord('sc_cat_item');
+      grCat.addQuery('active', true);
+      grCat.addQuery('name', 'CONTAINS', encodedQuery)
+        .addOrCondition('short_description', 'CONTAINS', encodedQuery);
+      grCat.setLimit(5);
+      grCat.orderByDesc('order');
+      grCat.query();
+      while (grCat.next()) {
+        results.push({
+          type: 'catalog',
+          title: grCat.getValue('name'),
+          description: grCat.getValue('short_description') || 'Service catalog item',
+          url: '?id=sc_cat_item&amp;sys_id=' + grCat.getUniqueValue(),
+          sys_id: grCat.getUniqueValue()
+        });
+      }
+    } catch (e) { /* table access error */ }
+
+    // Search Users
+    try {
+      var grUser = new GlideRecord('sys_user');
+      grUser.addQuery('active', true);
+      grUser.addQuery('name', 'CONTAINS', encodedQuery)
+        .addOrCondition('user_name', 'CONTAINS', encodedQuery)
+        .addOrCondition('email', 'CONTAINS', encodedQuery);
+      grUser.setLimit(5);
+      grUser.orderBy('name');
+      grUser.query();
+      while (grUser.next()) {
+        results.push({
+          type: 'user',
+          title: grUser.getValue('name'),
+          description: grUser.getDisplayValue('department') + ' | ' + (grUser.getValue('email') || '') + ' | ' + grUser.getDisplayValue('title'),
+          url: '?id=user_profile&amp;sys_id=' + grUser.getUniqueValue(),
+          sys_id: grUser.getUniqueValue()
+        });
+      }
+    } catch (e) { /* table access error */ }
+
+    return results;
+  }
+
+  // ============================
+  // Log Voice Command
+  // ============================
+  function logVoiceCommand(commandText, action, target) {
+    try {
+      var grLog = new GlideRecord('x_voice_history');
+      if (grLog.isValid()) {
+        grLog.initialize();
+        grLog.setValue('user', gs.getUserID());
+        grLog.setValue('command_text', commandText || '');
+        grLog.setValue('executed_action', action || '');
+        grLog.setValue('action_target', target || '');
+        grLog.setValue('status', 'success');
+        grLog.setValue('executed_on', new GlideDateTime());
+        grLog.insert();
+      }
+    } catch (e) {
+      // Table may not exist — log to system log instead
+      gs.info('Voice Navigation Command: user=' + gs.getUserID() + ' command="' + commandText + '" action=' + action);
+    }
+  }
+
+  // ============================
+  // Get Command History
+  // ============================
+  function getCommandHistory() {
+    var history = [];
+    try {
+      var grHist = new GlideRecord('x_voice_history');
+      if (grHist.isValid()) {
+        grHist.addQuery('user', gs.getUserID());
+        grHist.orderByDesc('executed_on');
+        grHist.setLimit(20);
+        grHist.query();
+        while (grHist.next()) {
+          var execTime = new GlideDateTime(grHist.getValue('executed_on'));
+          var now = new GlideDateTime();
+          var dur = GlideDateTime.subtract(execTime, now);
+          var seconds = parseInt(dur.getNumericValue() / 1000);
+          var timeAgo = '';
+
+          if (seconds &lt; 60) timeAgo = 'just now';
+          else if (seconds &lt; 3600) timeAgo = Math.floor(seconds / 60) + 'm ago';
+          else if (seconds &lt; 86400) timeAgo = Math.floor(seconds / 3600) + 'h ago';
+          else timeAgo = Math.floor(seconds / 86400) + 'd ago';
+
+          history.push({
+            sys_id: grHist.getUniqueValue(),
+            command_text: grHist.getValue('command_text') || '',
+            executed_action: grHist.getValue('executed_action') || '',
+            status: grHist.getValue('status') || 'success',
+            time_ago: timeAgo
+          });
+        }
+      }
+    } catch (e) {
+      // Table may not exist
+    }
+    return history;
+  }
+
+  // ============================
+  // Save Custom Command
+  // ============================
+  function saveCustomVoiceCommand(phrase, actionType, target) {
+    try {
+      var grCmd = new GlideRecord('x_voice_command');
+      if (grCmd.isValid()) {
+        grCmd.initialize();
+        grCmd.setValue('label', phrase);
+        grCmd.setValue('description', 'Custom command by ' + gs.getUserDisplayName());
+        grCmd.setValue('action_type', actionType || 'navigate');
+        grCmd.setValue('action_target', target || '');
+        grCmd.setValue('patterns', phrase);
+        grCmd.setValue('category', 'Custom');
+        grCmd.setValue('active', true);
+        grCmd.setValue('created_by', gs.getUserID());
+        grCmd.insert();
+      }
+    } catch (e) {
+      gs.info('Voice Nav: Could not save custom command to x_voice_command table: ' + e.message);
+    }
+  }
+
+  // ============================
+  // User Preferences
+  // ============================
+  function getUserPreferences() {
+    var prefs = {
+      language: 'en-US',
+      wake_sensitivity: 'medium'
+    };
+
+    try {
+      var grPref = new GlideRecord('sys_user_preference');
+      grPref.addQuery('user', gs.getUserID());
+      grPref.addQuery('name', 'STARTSWITH', 'voice_nav.');
+      grPref.query();
+      while (grPref.next()) {
+        var name = grPref.getValue('name').replace('voice_nav.', '');
+        prefs[name] = grPref.getValue('value');
+      }
+    } catch (e) {
+      // Use defaults
+    }
+
+    return prefs;
+  }
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;admin&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-02-08 03:39:30&lt;/sys_created_on&gt;&lt;sys_id&gt;ca6ddcf393b2765013b7326efaba10bc&lt;/sys_id&gt;&lt;sys_mod_count&gt;1&lt;/sys_mod_count&gt;&lt;sys_name&gt;Voice-Controlled Navigation Widget&lt;/sys_name&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_ca6ddcf393b2765013b7326efaba10bc&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;admin&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-02-08 04:19:36&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="voice-nav-widget" ng-class="{'vn-palette-open': c.paletteOpen, 'vn-listening': c.isListening, 'vn-tutorial-active': c.tutorialMode}"&gt;
+  
+  &lt;!-- Screen Reader Live Region --&gt;
+  &lt;div class="sr-only" aria-live="assertive" aria-atomic="true" role="status"&gt;
+    {{c.srAnnouncement}}
+  &lt;/div&gt;
+
+  &lt;!-- Voice Activation Button (Floating) --&gt;
+  &lt;button class="vn-voice-btn"
+          ng-class="{
+            'vn-voice-btn--listening': c.isListening,
+            'vn-voice-btn--processing': c.isProcessing,
+            'vn-voice-btn--success': c.lastStatus === 'success',
+            'vn-voice-btn--error': c.lastStatus === 'error'
+          }"
+          ng-mousedown="c.startListening()"
+          ng-mouseup="c.stopListening()"
+          ng-touchstart="c.startListening()"
+          ng-touchend="c.stopListening()"
+          ng-keydown="c.handleVoiceBtnKey($event)"
+          ng-keyup="c.handleVoiceBtnKeyUp($event)"
+          aria-label="{{c.isListening ? 'Listening... Release to stop' : 'Push and hold to speak a voice command'}}"
+          title="Push to Talk (or press Ctrl+K for command palette)"&gt;
+    &lt;span class="vn-voice-btn__icon" aria-hidden="true"&gt;
+      &lt;svg ng-if="!c.isListening &amp;&amp; !c.isProcessing" viewBox="0 0 24 24" width="28" height="28" fill="currentColor"&gt;
+        &lt;path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5z"/&gt;
+        &lt;path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/&gt;
+      &lt;/svg&gt;
+      &lt;svg ng-if="c.isListening" class="vn-mic-active" viewBox="0 0 24 24" width="28" height="28" fill="currentColor"&gt;
+        &lt;path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/&gt;
+        &lt;path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/&gt;
+      &lt;/svg&gt;
+      &lt;svg ng-if="c.isProcessing" class="vn-spinner-icon" viewBox="0 0 24 24" width="28" height="28" fill="currentColor"&gt;
+        &lt;path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/&gt;
+      &lt;/svg&gt;
+    &lt;/span&gt;
+    &lt;span class="vn-voice-btn__pulse" ng-if="c.isListening" aria-hidden="true"&gt;&lt;/span&gt;
+    &lt;span class="vn-voice-btn__pulse vn-voice-btn__pulse--delayed" ng-if="c.isListening" aria-hidden="true"&gt;&lt;/span&gt;
+  &lt;/button&gt;
+
+  &lt;!-- Waveform Visualization --&gt;
+  &lt;div class="vn-waveform-container" ng-show="c.isListening" aria-hidden="true"&gt;
+    &lt;canvas id="vn-waveform-canvas" class="vn-waveform-canvas" width="300" height="60"&gt;&lt;/canvas&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Interim Speech Text Preview --&gt;
+  &lt;div class="vn-speech-preview" ng-show="c.interimText" aria-hidden="true"&gt;
+    &lt;span class="vn-speech-preview__text"&gt;{{c.interimText}}&lt;/span&gt;
+    &lt;span class="vn-speech-preview__confidence" ng-if="c.confidence &gt; 0"&gt;
+      {{(c.confidence * 100) | number:0}}% confident
+    &lt;/span&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Command Palette Overlay --&gt;
+  &lt;div class="vn-palette-overlay" ng-show="c.paletteOpen" ng-click="c.closePalette($event)" role="dialog" aria-modal="true" aria-label="Command palette"&gt;
+    &lt;div class="vn-palette" ng-click="$event.stopPropagation()"&gt;
+      &lt;!-- Palette Header --&gt;
+      &lt;div class="vn-palette__header"&gt;
+        &lt;div class="vn-palette__input-wrap"&gt;
+          &lt;svg class="vn-palette__search-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"&gt;
+            &lt;path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/&gt;
+          &lt;/svg&gt;
+          &lt;input class="vn-palette__input"
+                 type="text"
+                 ng-model="c.commandQuery"
+                 ng-change="c.onCommandQueryChange()"
+                 placeholder="Type a command or search... (try 'create incident')"
+                 aria-label="Command input"
+                 aria-describedby="vn-palette-help"
+                 aria-activedescendant="{{c.activeResultId}}"
+                 role="combobox"
+                 aria-expanded="{{c.filteredCommands.length &gt; 0 || c.searchResults.length &gt; 0}}"
+                 aria-owns="vn-results-list"
+                 id="vn-palette-input"
+                 tabindex="0"
+                 ng-keydown="c.handlePaletteKeydown($event)" /&gt;
+          &lt;button class="vn-palette__voice-toggle"
+                  ng-click="c.toggleListeningInPalette()"
+                  ng-class="{'vn-active': c.isListening}"
+                  aria-label="{{c.isListening ? 'Stop voice input' : 'Start voice input'}}"
+                  title="Voice input"&gt;
+            &lt;svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"&gt;
+              &lt;path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/&gt;
+              &lt;path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/&gt;
+            &lt;/svg&gt;
+          &lt;/button&gt;
+        &lt;/div&gt;
+        &lt;p class="vn-palette__help-text" id="vn-palette-help"&gt;
+          &lt;span ng-if="!c.isListening"&gt;Press &lt;kbd&gt;↑&lt;/kbd&gt;&lt;kbd&gt;↓&lt;/kbd&gt; to navigate, &lt;kbd&gt;Enter&lt;/kbd&gt; to execute, &lt;kbd&gt;Esc&lt;/kbd&gt; to close&lt;/span&gt;
+          &lt;span ng-if="c.isListening" class="vn-listening-indicator"&gt;
+            &lt;span class="vn-listening-dot"&gt;&lt;/span&gt; Listening...
+          &lt;/span&gt;
+        &lt;/p&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Language Selector --&gt;
+      &lt;div class="vn-palette__lang-bar"&gt;
+        &lt;label class="vn-palette__lang-label" for="vn-lang-select"&gt;Language:&lt;/label&gt;
+        &lt;select class="vn-palette__lang-select" id="vn-lang-select" ng-model="c.selectedLanguage" ng-change="c.onLanguageChange()"&gt;
+          &lt;option ng-repeat="lang in c.languages" value="{{lang.code}}"&gt;{{lang.name}}&lt;/option&gt;
+        &lt;/select&gt;
+        &lt;button class="vn-palette__tutorial-btn" ng-click="c.startTutorial()" title="Start tutorial"&gt;
+          &lt;svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"&gt;&lt;path d="M11 18h2v-2h-2v2zm1-16C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm0-14c-2.21 0-4 1.79-4 4h2c0-1.1.9-2 2-2s2 .9 2 2c0 2-3 1.75-3 5h2c0-2.25 3-2.5 3-5 0-2.21-1.79-4-4-4z"/&gt;&lt;/svg&gt;
+          Tutorial
+        &lt;/button&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Tabs --&gt;
+      &lt;div class="vn-palette__tabs" role="tablist"&gt;
+        &lt;button class="vn-palette__tab" 
+                ng-class="{'vn-palette__tab--active': c.activeTab === 'commands'}"
+                ng-click="c.setActiveTab('commands')"
+                role="tab"
+                aria-selected="{{c.activeTab === 'commands'}}"&gt;
+          Commands &lt;span class="vn-badge" ng-if="c.filteredCommands.length"&gt;{{c.filteredCommands.length}}&lt;/span&gt;
+        &lt;/button&gt;
+        &lt;button class="vn-palette__tab"
+                ng-class="{'vn-palette__tab--active': c.activeTab === 'search'}"
+                ng-click="c.setActiveTab('search')"
+                role="tab"
+                aria-selected="{{c.activeTab === 'search'}}"&gt;
+          Search &lt;span class="vn-badge" ng-if="c.searchResults.length"&gt;{{c.searchResults.length}}&lt;/span&gt;
+        &lt;/button&gt;
+        &lt;button class="vn-palette__tab"
+                ng-class="{'vn-palette__tab--active': c.activeTab === 'history'}"
+                ng-click="c.setActiveTab('history')"
+                role="tab"
+                aria-selected="{{c.activeTab === 'history'}}"&gt;
+          History &lt;span class="vn-badge" ng-if="c.commandHistory.length"&gt;{{c.commandHistory.length}}&lt;/span&gt;
+        &lt;/button&gt;
+        &lt;button class="vn-palette__tab"
+                ng-class="{'vn-palette__tab--active': c.activeTab === 'custom'}"
+                ng-click="c.setActiveTab('custom')"
+                role="tab"
+                aria-selected="{{c.activeTab === 'custom'}}"&gt;
+          Custom
+        &lt;/button&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Results Area --&gt;
+      &lt;div class="vn-palette__results" id="vn-results-list" role="listbox"&gt;
+
+        &lt;!-- Commands Tab --&gt;
+        &lt;div ng-if="c.activeTab === 'commands'"&gt;
+          &lt;div class="vn-palette__group-label" ng-if="c.filteredCommands.length"&gt;Available Commands&lt;/div&gt;
+          &lt;div class="vn-result-item"
+               ng-repeat="cmd in c.filteredCommands track by $index"
+               ng-class="{'vn-result-item--active': c.selectedIndex === $index}"
+               ng-click="c.executeCommand(cmd)"
+               ng-mouseenter="c.selectedIndex = $index"
+               role="option"
+               id="vn-result-{{$index}}"
+               aria-selected="{{c.selectedIndex === $index}}"&gt;
+            &lt;span class="vn-result-item__icon" aria-hidden="true"&gt;
+              &lt;span ng-if="cmd.icon"&gt;{{cmd.icon}}&lt;/span&gt;
+              &lt;svg ng-if="!cmd.icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"&gt;
+                &lt;path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/&gt;
+              &lt;/svg&gt;
+            &lt;/span&gt;
+            &lt;div class="vn-result-item__content"&gt;
+              &lt;span class="vn-result-item__title" ng-bind-html="c.highlightMatch(cmd.label, c.commandQuery)"&gt;&lt;/span&gt;
+              &lt;span class="vn-result-item__desc"&gt;{{cmd.description}}&lt;/span&gt;
+            &lt;/div&gt;
+            &lt;span class="vn-result-item__shortcut" ng-if="cmd.shortcut"&gt;
+              &lt;kbd ng-repeat="key in cmd.shortcut.split('+')" class="vn-kbd"&gt;{{key}}&lt;/kbd&gt;
+            &lt;/span&gt;
+            &lt;span class="vn-result-item__category"&gt;{{cmd.category}}&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div class="vn-palette__empty" ng-if="!c.filteredCommands.length &amp;&amp; c.commandQuery"&gt;
+            &lt;svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor" opacity="0.3"&gt;&lt;path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/&gt;&lt;/svg&gt;
+            &lt;p&gt;No commands match "&lt;strong&gt;{{c.commandQuery}}&lt;/strong&gt;"&lt;/p&gt;
+            &lt;p class="vn-palette__empty-hint"&gt;Try voice input or search across ServiceNow data&lt;/p&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Search Tab --&gt;
+        &lt;div ng-if="c.activeTab === 'search'"&gt;
+          &lt;div class="vn-palette__group-label" ng-if="c.searchResults.length"&gt;Search Results&lt;/div&gt;
+          &lt;div class="vn-search-loading" ng-if="c.isSearching"&gt;
+            &lt;div class="vn-spinner"&gt;&lt;/div&gt;
+            &lt;span&gt;Searching across ServiceNow...&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div class="vn-result-item"
+               ng-repeat="result in c.searchResults track by $index"
+               ng-class="{'vn-result-item--active': c.selectedIndex === $index}"
+               ng-click="c.openSearchResult(result)"
+               ng-mouseenter="c.selectedIndex = $index"
+               role="option"
+               id="vn-search-result-{{$index}}"&gt;
+            &lt;span class="vn-result-item__icon vn-result-item__icon--{{result.type}}" aria-hidden="true"&gt;
+              &lt;span ng-if="result.type === 'incident'"&gt;]]&gt;🔥&lt;![CDATA[&lt;/span&gt;
+              &lt;span ng-if="result.type === 'knowledge'"&gt;]]&gt;📖&lt;![CDATA[&lt;/span&gt;
+              &lt;span ng-if="result.type === 'catalog'"&gt;]]&gt;🛒&lt;![CDATA[&lt;/span&gt;
+              &lt;span ng-if="result.type === 'user'"&gt;]]&gt;👤&lt;![CDATA[&lt;/span&gt;
+            &lt;/span&gt;
+            &lt;div class="vn-result-item__content"&gt;
+              &lt;span class="vn-result-item__title"&gt;{{result.title}}&lt;/span&gt;
+              &lt;span class="vn-result-item__desc"&gt;{{result.description}}&lt;/span&gt;
+            &lt;/div&gt;
+            &lt;span class="vn-result-item__type-badge vn-result-item__type-badge--{{result.type}}"&gt;
+              {{result.type}}
+            &lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div class="vn-palette__empty" ng-if="!c.searchResults.length &amp;&amp; !c.isSearching &amp;&amp; c.commandQuery"&gt;
+            &lt;p&gt;No results found for "&lt;strong&gt;{{c.commandQuery}}&lt;/strong&gt;"&lt;/p&gt;
+          &lt;/div&gt;
+          &lt;div class="vn-palette__empty" ng-if="!c.commandQuery &amp;&amp; !c.isSearching"&gt;
+            &lt;p&gt;Type or speak to search incidents, knowledge articles, catalog items, and users&lt;/p&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;!-- History Tab --&gt;
+        &lt;div ng-if="c.activeTab === 'history'"&gt;
+          &lt;div class="vn-palette__group-label" ng-if="c.commandHistory.length"&gt;Recent Commands&lt;/div&gt;
+          &lt;div class="vn-result-item"
+               ng-repeat="hist in c.commandHistory track by $index"
+               ng-class="{'vn-result-item--active': c.selectedIndex === $index}"
+               ng-click="c.repeatCommand(hist)"
+               ng-mouseenter="c.selectedIndex = $index"
+               role="option"&gt;
+            &lt;span class="vn-result-item__icon" aria-hidden="true"&gt;
+              &lt;span ng-if="hist.status === 'success'"&gt;✅&lt;/span&gt;
+              &lt;span ng-if="hist.status === 'error'"&gt;❌&lt;/span&gt;
+              &lt;span ng-if="hist.status === 'pending'"&gt;⏳&lt;/span&gt;
+            &lt;/span&gt;
+            &lt;div class="vn-result-item__content"&gt;
+              &lt;span class="vn-result-item__title"&gt;"{{hist.command_text}}"&lt;/span&gt;
+              &lt;span class="vn-result-item__desc"&gt;{{hist.executed_action}} — {{hist.time_ago}}&lt;/span&gt;
+            &lt;/div&gt;
+            &lt;button class="vn-result-item__repeat-btn" ng-click="c.repeatCommand(hist); $event.stopPropagation();" aria-label="Repeat command" title="Repeat"&gt;
+              &lt;svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"&gt;&lt;path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/&gt;&lt;/svg&gt;
+            &lt;/button&gt;
+          &lt;/div&gt;
+          &lt;div class="vn-palette__empty" ng-if="!c.commandHistory.length"&gt;
+            &lt;p&gt;No command history yet. Try speaking or typing a command!&lt;/p&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Custom Commands Tab --&gt;
+        &lt;div ng-if="c.activeTab === 'custom'"&gt;
+          &lt;div class="vn-palette__group-label"&gt;Custom Command Builder&lt;/div&gt;
+          &lt;div class="vn-custom-form"&gt;
+            &lt;div class="vn-custom-form__row"&gt;
+              &lt;label class="vn-custom-form__label" for="vn-custom-phrase"&gt;Voice Phrase&lt;/label&gt;
+              &lt;input class="vn-custom-form__input" id="vn-custom-phrase" type="text" ng-model="c.newCustomCommand.phrase" placeholder="e.g., 'show my tickets'" /&gt;
+            &lt;/div&gt;
+            &lt;div class="vn-custom-form__row"&gt;
+              &lt;label class="vn-custom-form__label" for="vn-custom-action"&gt;Action Type&lt;/label&gt;
+              &lt;select class="vn-custom-form__input" id="vn-custom-action" ng-model="c.newCustomCommand.action_type"&gt;
+                &lt;option value="navigate"&gt;Navigate to URL&lt;/option&gt;
+                &lt;option value="page"&gt;Go to Portal Page&lt;/option&gt;
+                &lt;option value="search"&gt;Search Query&lt;/option&gt;
+              &lt;/select&gt;
+            &lt;/div&gt;
+            &lt;div class="vn-custom-form__row"&gt;
+              &lt;label class="vn-custom-form__label" for="vn-custom-target"&gt;Target URL / Page ID&lt;/label&gt;
+              &lt;input class="vn-custom-form__input" id="vn-custom-target" type="text" ng-model="c.newCustomCommand.target" placeholder="e.g., ?id=my_page or /nav_to.do?uri=..." /&gt;
+            &lt;/div&gt;
+            &lt;button class="vn-custom-form__submit" ng-click="c.saveCustomCommand()" ng-disabled="!c.newCustomCommand.phrase || !c.newCustomCommand.target"&gt;
+              Save Custom Command
+            &lt;/button&gt;
+          &lt;/div&gt;
+          &lt;div class="vn-palette__group-label" ng-if="c.customCommands.length" style="margin-top: 12px;"&gt;Your Custom Commands&lt;/div&gt;
+          &lt;div class="vn-result-item" ng-repeat="custom in c.customCommands track by $index"&gt;
+            &lt;span class="vn-result-item__icon" aria-hidden="true"&gt;⚙️&lt;/span&gt;
+            &lt;div class="vn-result-item__content"&gt;
+              &lt;span class="vn-result-item__title"&gt;"{{custom.phrase}}"&lt;/span&gt;
+              &lt;span class="vn-result-item__desc"&gt;{{custom.action_type}}: {{custom.target}}&lt;/span&gt;
+            &lt;/div&gt;
+            &lt;button class="vn-result-item__delete-btn" ng-click="c.deleteCustomCommand(custom, $index); $event.stopPropagation();" aria-label="Delete custom command" title="Delete"&gt;
+              &lt;svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"&gt;&lt;path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/&gt;&lt;/svg&gt;
+            &lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Palette Footer --&gt;
+      &lt;div class="vn-palette__footer"&gt;
+        &lt;span class="vn-palette__footer-item"&gt;&lt;kbd class="vn-kbd"&gt;Ctrl&lt;/kbd&gt;+&lt;kbd class="vn-kbd"&gt;K&lt;/kbd&gt; Toggle&lt;/span&gt;
+        &lt;span class="vn-palette__footer-item"&gt;&lt;kbd class="vn-kbd"&gt;Space&lt;/kbd&gt; Push-to-Talk&lt;/span&gt;
+        &lt;span class="vn-palette__footer-item"&gt;&lt;kbd class="vn-kbd"&gt;Tab&lt;/kbd&gt; Switch tabs&lt;/span&gt;
+        &lt;span class="vn-palette__footer-item"&gt;&lt;kbd class="vn-kbd"&gt;Esc&lt;/kbd&gt; Close&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Tutorial Overlay --&gt;
+  &lt;div class="vn-tutorial-overlay" ng-show="c.tutorialMode"&gt;
+    &lt;div class="vn-tutorial-card"&gt;
+      &lt;div class="vn-tutorial-card__progress"&gt;
+        &lt;div class="vn-tutorial-card__progress-bar" ng-style="{'width': ((c.tutorialStep + 1) / c.tutorialSteps.length * 100) + '%'}"&gt;&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;h3 class="vn-tutorial-card__title"&gt;{{c.tutorialSteps[c.tutorialStep].title}}&lt;/h3&gt;
+      &lt;p class="vn-tutorial-card__body"&gt;{{c.tutorialSteps[c.tutorialStep].body}}&lt;/p&gt;
+      &lt;div class="vn-tutorial-card__practice" ng-if="c.tutorialSteps[c.tutorialStep].practice"&gt;
+        &lt;p class="vn-tutorial-card__practice-label"&gt;Try saying:&lt;/p&gt;
+        &lt;p class="vn-tutorial-card__practice-text"&gt;"{{c.tutorialSteps[c.tutorialStep].practice}}"&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class="vn-tutorial-card__actions"&gt;
+        &lt;button class="vn-btn vn-btn--secondary" ng-click="c.endTutorial()"&gt;Skip&lt;/button&gt;
+        &lt;button class="vn-btn vn-btn--secondary" ng-click="c.prevTutorialStep()" ng-disabled="c.tutorialStep === 0"&gt;Previous&lt;/button&gt;
+        &lt;button class="vn-btn vn-btn--primary" ng-click="c.nextTutorialStep()"&gt;
+          {{c.tutorialStep === c.tutorialSteps.length - 1 ? 'Finish' : 'Next'}}
+        &lt;/button&gt;
+      &lt;/div&gt;
+      &lt;p class="vn-tutorial-card__step-count"&gt;Step {{c.tutorialStep + 1}} of {{c.tutorialSteps.length}}&lt;/p&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Toast Notification --&gt;
+  &lt;div class="vn-toast" ng-show="c.toastVisible" ng-class="'vn-toast--' + c.toastType" role="alert"&gt;
+    &lt;span class="vn-toast__icon" aria-hidden="true"&gt;
+      &lt;span ng-if="c.toastType === 'success'"&gt;✓&lt;/span&gt;
+      &lt;span ng-if="c.toastType === 'error'"&gt;✕&lt;/span&gt;
+      &lt;span ng-if="c.toastType === 'info'"&gt;ℹ&lt;/span&gt;
+    &lt;/span&gt;
+    &lt;span class="vn-toast__message"&gt;{{c.toastMessage}}&lt;/span&gt;
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;u_search_keys/&gt;&lt;/sp_widget&gt;&lt;/record_update&gt;</payload>
+<payload_hash>2007502634</payload_hash>
+<remote_update_set display_value="SNLab_voice_widget">c5c620b79336765013b7326efaba1048</remote_update_set>
+<replace_on_upgrade>false</replace_on_upgrade>
+<sys_created_by>admin</sys_created_by>
+<sys_created_on>2026-02-08 04:20:23</sys_created_on>
+<sys_id>41c620b79336765013b7326efaba1049</sys_id>
+<sys_mod_count>0</sys_mod_count>
+<sys_recorded_at>19c3b79fef80000001</sys_recorded_at>
+<sys_updated_by>admin</sys_updated_by>
+<sys_updated_on>2026-02-08 04:20:23</sys_updated_on>
+<table/>
+<target_name>Voice-Controlled Navigation Widget</target_name>
+<type>Widget</type>
+<update_domain>global</update_domain>
+<update_guid>ed96e47745367650a4c077f2cc078572</update_guid>
+<update_guid_history>ed96e47745367650a4c077f2cc078572:2007502634,0a6ddcf330b276501336be9eda9627bf:-1592249914</update_guid_history>
+<update_set display_value=""/>
+<view/>
+</sys_update_xml>
+</unload>
