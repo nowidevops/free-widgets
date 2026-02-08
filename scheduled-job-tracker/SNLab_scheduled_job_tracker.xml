@@ -1,0 +1,2690 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<unload unload_date="2026-02-08 09:15:19">
+<sp_widget action="INSERT_OR_UPDATE">
+<category>custom</category>
+<client_script><![CDATA[api.controller = function($scope, $interval, $timeout, $window) {
+  'use strict';
+
+  var c = this;
+
+  // ---- State Initialization ----
+  c.allJobs = [];
+  c.filteredJobs = [];
+  c.summaryStats = [];
+  c.searchTerm = '';
+  c.statusFilter = '';
+  c.sortField = 'name';
+  c.sortAsc = true;
+  c.refreshInterval = '60000';
+  c.loading = false;
+  c.lastUpdated = null;
+  c.currentPage = 1;
+  c.pageSize = 50;
+  c.totalPages = 1;
+  c.isAdmin = false;
+  c.activeFilterLabel = '';
+  c.toast = { show: false, message: '', type: 'info' };
+
+  var refreshTimer = null;
+  var toastTimer = null;
+
+  // State mapping
+  var stateMap = {
+    '0': { key: 'ready', display: 'Ready', icon: 'fa-clock-o' },
+    '1': { key: 'executing', display: 'Executing', icon: 'fa-cog fa-spin' },
+    '2': { key: 'complete', display: 'Complete', icon: 'fa-check' },
+    '-1': { key: 'error', display: 'Error', icon: 'fa-exclamation-triangle' },
+    '3': { key: 'queued', display: 'Queued', icon: 'fa-hourglass-half' }
+  };
+
+  // ---- Initialization ----
+  function init() {
+    if (c.data) {
+      c.allJobs = c.data.jobs || [];
+      c.isAdmin = c.data.isAdmin || false;
+      processJobs();
+      buildSummaryStats();
+      c.applyFilters();
+      c.lastUpdated = new Date();
+    }
+    c.setRefreshInterval();
+  }
+
+  function processJobs() {
+    c.allJobs.forEach(function(job) {
+      var stInfo = stateMap[String(job.trigger_state)] || stateMap['0'];
+      job.state_key = stInfo.key;
+      job.state_display = stInfo.display;
+      job.state_icon = stInfo.icon;
+      job.expanded = false;
+      job.detailLoading = false;
+
+      // Format durations
+      if (job.avg_duration) {
+        job.avg_duration_display = formatDuration(job.avg_duration);
+      }
+
+      // Format dates for display
+      if (job.last_run) {
+        job.last_run_display = formatRelativeTime(job.last_run);
+      }
+      if (job.next_action) {
+        job.next_action_display = formatRelativeTime(job.next_action);
+      }
+    });
+  }
+
+  function buildSummaryStats() {
+    var counts = { executing: 0, ready: 0, queued: 0, complete: 0, error: 0 };
+    var total = c.allJobs.length;
+
+    c.allJobs.forEach(function(job) {
+      if (counts.hasOwnProperty(job.state_key)) {
+        counts[job.state_key]++;
+      }
+    });
+
+    // Use server-provided stats if available
+    if (c.data && c.data.stateCounts) {
+      counts = c.data.stateCounts;
+      total = 0;
+      Object.keys(counts).forEach(function(k) { total += counts[k]; });
+    }
+
+    var statDefs = [
+      { key: 'executing', label: 'Running', icon: 'fa-cog' },
+      { key: 'error', label: 'Failed', icon: 'fa-exclamation-triangle' },
+      { key: 'ready', label: 'Ready', icon: 'fa-clock-o' },
+      { key: 'queued', label: 'Queued', icon: 'fa-hourglass-half' },
+      { key: 'complete', label: 'Completed', icon: 'fa-check-circle' },
+      { key: 'total', label: 'Total Jobs', icon: 'fa-database' }
+    ];
+
+    c.summaryStats = statDefs.map(function(sd) {
+      var count = sd.key === 'total' ? total : (counts[sd.key] || 0);
+      return {
+        key: sd.key,
+        label: sd.label,
+        icon: sd.icon,
+        count: count,
+        percentage: total > 0 ? Math.round((count / total) * 100) : 0
+      };
+    });
+  }
+
+  function formatDuration(seconds) {
+    if (!seconds || seconds <= 0) return '—';
+    seconds = parseFloat(seconds);
+    if (seconds < 60) return Math.round(seconds) + 's';
+    if (seconds < 3600) return Math.round(seconds / 60) + 'm ' + Math.round(seconds % 60) + 's';
+    var h = Math.floor(seconds / 3600);
+    var m = Math.round((seconds % 3600) / 60);
+    return h + 'h ' + m + 'm';
+  }
+
+  function formatRelativeTime(dateStr) {
+    if (!dateStr) return '';
+    try {
+      var date = new Date(dateStr.replace(/-/g, '/'));
+      var now = new Date();
+      var diff = (now - date) / 1000;
+
+      if (Math.abs(diff) < 60) return 'Just now';
+      if (diff > 0 && diff < 3600) return Math.round(diff / 60) + 'm ago';
+      if (diff > 0 && diff < 86400) return Math.round(diff / 3600) + 'h ago';
+      if (diff < 0 && Math.abs(diff) < 3600) return 'In ' + Math.round(Math.abs(diff) / 60) + 'm';
+      if (diff < 0 && Math.abs(diff) < 86400) return 'In ' + Math.round(Math.abs(diff) / 3600) + 'h';
+
+      // Fallback to short date
+      return (date.getMonth() + 1) + '/' + date.getDate() + ' ' +
+             date.getHours().toString().padStart(2, '0') + ':' +
+             date.getMinutes().toString().padStart(2, '0');
+    } catch (e) {
+      return dateStr;
+    }
+  }
+
+  // ---- Refresh ----
+  c.setRefreshInterval = function() {
+    if (refreshTimer) {
+      $interval.cancel(refreshTimer);
+      refreshTimer = null;
+    }
+    var interval = parseInt(c.refreshInterval, 10);
+    if (interval > 0) {
+      refreshTimer = $interval(function() {
+        c.refreshData();
+      }, interval);
+    }
+  };
+
+  c.refreshData = function() {
+    if (c.loading) return;
+    c.loading = true;
+
+    c.server.get({
+      action: 'refresh',
+      searchTerm: c.searchTerm,
+      statusFilter: c.statusFilter,
+      page: c.currentPage,
+      pageSize: c.pageSize
+    }).then(function(response) {
+      if (response.data) {
+        c.allJobs = response.data.jobs || [];
+        c.isAdmin = response.data.isAdmin || false;
+        if (response.data.stateCounts) {
+          c.data.stateCounts = response.data.stateCounts;
+        }
+        processJobs();
+        buildSummaryStats();
+        c.applyFilters();
+        c.lastUpdated = new Date();
+      }
+      c.loading = false;
+    }, function() {
+      c.loading = false;
+      c.showToast('Failed to refresh job data', 'error');
+    });
+  };
+
+  // ---- Filtering & Sorting ----
+  c.applyFilters = function() {
+    var filtered = c.allJobs.slice();
+
+    // Text search
+    if (c.searchTerm) {
+      var term = c.searchTerm.toLowerCase();
+      filtered = filtered.filter(function(job) {
+        return (job.name && job.name.toLowerCase().indexOf(term) !== -1) ||
+               (job.run_type && job.run_type.toLowerCase().indexOf(term) !== -1) ||
+               (job.state_display && job.state_display.toLowerCase().indexOf(term) !== -1) ||
+               (job.sys_id && job.sys_id.toLowerCase().indexOf(term) !== -1);
+      });
+    }
+
+    // Status filter
+    if (c.statusFilter) {
+      filtered = filtered.filter(function(job) {
+        return job.state_key === c.statusFilter;
+      });
+    }
+
+    // Sorting
+    c.applyClientSort(filtered);
+
+    c.filteredJobs = filtered;
+    c.totalPages = Math.max(1, Math.ceil(filtered.length / c.pageSize));
+    if (c.currentPage > c.totalPages) c.currentPage = 1;
+
+    // Paginate client-side for display
+    var start = (c.currentPage - 1) * c.pageSize;
+    c.filteredJobs = filtered.slice(start, start + c.pageSize);
+
+    updateFilterLabel();
+  };
+
+  c.applyClientSort = function(arr) {
+    var field = c.sortField;
+    var asc = c.sortAsc;
+    arr.sort(function(a, b) {
+      var valA = a[field] || '';
+      var valB = b[field] || '';
+      if (typeof valA === 'string') valA = valA.toLowerCase();
+      if (typeof valB === 'string') valB = valB.toLowerCase();
+      if (field === 'avg_duration' || field === 'success_rate' || field === 'execution_count') {
+        valA = parseFloat(valA) || 0;
+        valB = parseFloat(valB) || 0;
+      }
+      if (valA < valB) return asc ? -1 : 1;
+      if (valA > valB) return asc ? 1 : -1;
+      return 0;
+    });
+  };
+
+  c.sortBy = function(field) {
+    if (c.sortField === field) {
+      c.sortAsc = !c.sortAsc;
+    } else {
+      c.sortField = field;
+      c.sortAsc = true;
+    }
+    c.applyFilters();
+  };
+
+  c.applySort = function() {
+    c.applyFilters();
+  };
+
+  c.toggleSortDir = function() {
+    c.sortAsc = !c.sortAsc;
+    c.applyFilters();
+  };
+
+  c.getSortIcon = function(field) {
+    if (c.sortField !== field) return 'fa-sort';
+    return c.sortAsc ? 'fa-sort-asc' : 'fa-sort-desc';
+  };
+
+  c.filterByStatus = function(statusKey) {
+    if (statusKey === 'total') {
+      c.statusFilter = '';
+    } else {
+      c.statusFilter = (c.statusFilter === statusKey) ? '' : statusKey;
+    }
+    c.currentPage = 1;
+    c.applyFilters();
+  };
+
+  c.clearSearch = function() {
+    c.searchTerm = '';
+    c.currentPage = 1;
+    c.applyFilters();
+  };
+
+  c.clearAllFilters = function() {
+    c.searchTerm = '';
+    c.statusFilter = '';
+    c.currentPage = 1;
+    c.applyFilters();
+  };
+
+  function updateFilterLabel() {
+    var labels = [];
+    if (c.searchTerm) labels.push('Search: "' + c.searchTerm + '"');
+    if (c.statusFilter) {
+      var stateNames = { executing: 'Running', ready: 'Ready', queued: 'Queued', complete: 'Completed', error: 'Failed' };
+      labels.push('Status: ' + (stateNames[c.statusFilter] || c.statusFilter));
+    }
+    c.activeFilterLabel = labels.join(' | ');
+  }
+
+  // ---- Expand/Collapse ----
+  c.toggleExpand = function(job) {
+    if (job.expanded) {
+      job.expanded = false;
+      return;
+    }
+
+    // Collapse others
+    c.filteredJobs.forEach(function(j) {
+      if (j.sys_id !== job.sys_id) j.expanded = false;
+    });
+
+    job.expanded = true;
+    job.detailLoading = true;
+
+    c.server.get({
+      action: 'getJobDetail',
+      jobSysId: job.sys_id,
+      jobName: job.name
+    }).then(function(response) {
+      if (response.data && response.data.jobDetail) {
+        var detail = response.data.jobDetail;
+        job.error_logs = detail.error_logs || [];
+        job.execution_history = detail.execution_history || [];
+        job.dependencies = detail.dependencies || [];
+        job.execution_count = detail.execution_count || job.execution_count;
+        job.success_count = detail.success_count || 0;
+        job.failure_count = detail.failure_count || 0;
+        job.last_error = detail.last_error || '';
+
+        // Process execution history
+        if (job.execution_history) {
+          job.execution_history.forEach(function(exec) {
+            var stInfo = stateMap[String(exec.state_code)] || { key: 'ready', display: exec.state };
+            exec.state_key = stInfo.key;
+            exec.duration_display = formatDuration(exec.duration);
+          });
+        }
+      }
+      job.detailLoading = false;
+    }, function() {
+      job.detailLoading = false;
+      c.showToast('Failed to load job details', 'error');
+    });
+  };
+
+  // ---- Actions ----
+  c.triggerJob = function(job) {
+    if (!c.isAdmin || job.state_key === 'executing') return;
+
+    if (!$window.confirm('Are you sure you want to manually execute "' + job.name + '"?')) return;
+
+    c.server.get({
+      action: 'triggerJob',
+      jobSysId: job.sys_id
+    }).then(function(response) {
+      if (response.data && response.data.success) {
+        c.showToast('Job "' + job.name + '" has been triggered successfully.', 'success');
+        $timeout(function() {
+          c.refreshData();
+        }, 2000);
+      } else {
+        c.showToast(response.data.errorMsg || 'Failed to trigger job.', 'error');
+      }
+    }, function() {
+      c.showToast('Server error while triggering job.', 'error');
+    });
+  };
+
+  c.cancelJob = function(job) {
+    if (!c.isAdmin || job.state_key !== 'executing') return;
+
+    if (!$window.confirm('Are you sure you want to cancel "' + job.name + '"?')) return;
+
+    c.server.get({
+      action: 'cancelJob',
+      triggerSysId: job.trigger_sys_id
+    }).then(function(response) {
+      if (response.data && response.data.success) {
+        c.showToast('Job "' + job.name + '" has been cancelled.', 'success');
+        $timeout(function() {
+          c.refreshData();
+        }, 2000);
+      } else {
+        c.showToast(response.data.errorMsg || 'Failed to cancel job.', 'error');
+      }
+    }, function() {
+      c.showToast('Server error while cancelling job.', 'error');
+    });
+  };
+
+  c.viewJobRecord = function(job) {
+    var url = '/sysauto_script.do?sys_id=' + job.sys_id;
+    $window.open(url, '_blank');
+  };
+
+  // ---- Pagination ----
+  c.goToPage = function(page) {
+    if (page < 1 || page > c.totalPages) return;
+    c.currentPage = page;
+    c.applyFilters();
+  };
+
+  // ---- Export CSV ----
+  c.exportCSV = function() {
+    if (!c.filteredJobs.length) return;
+
+    var headers = ['Job Name', 'Status', 'Active', 'Run Type', 'Last Run', 'Next Run', 'Avg Duration', 'Success Rate', 'Execution Count'];
+    var rows = c.filteredJobs.map(function(job) {
+      return [
+        '"' + (job.name || '').replace(/"/g, '""') + '"',
+        job.state_display || '',
+        job.active ? 'Yes' : 'No',
+        job.run_type || '',
+        job.last_run || '',
+        job.next_action || '',
+        job.avg_duration_display || '',
+        (job.success_rate !== null && job.success_rate !== undefined) ? job.success_rate + '%' : '',
+        job.execution_count || 0
+      ].join(',');
+    });
+
+    var csvContent = headers.join(',') + '\n' + rows.join('\n');
+    var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    var link = document.createElement('a');
+    var url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'scheduled_jobs_report_' + new Date().toISOString().slice(0, 10) + '.csv');
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    c.showToast('CSV exported successfully (' + c.filteredJobs.length + ' jobs)', 'success');
+  };
+
+  // ---- Toast Notification ----
+  c.showToast = function(message, type) {
+    if (toastTimer) $timeout.cancel(toastTimer);
+    c.toast = { show: true, message: message, type: type || 'info' };
+    toastTimer = $timeout(function() {
+      c.toast.show = false;
+    }, 5000);
+  };
+
+  // ---- Keyboard Handlers ----
+  c.handleCardKeydown = function($event, key) {
+    if ($event.key === 'Enter' || $event.key === ' ') {
+      $event.preventDefault();
+      c.filterByStatus(key);
+    }
+  };
+
+  c.handleSortKeydown = function($event, field) {
+    if ($event.key === 'Enter' || $event.key === ' ') {
+      $event.preventDefault();
+      c.sortBy(field);
+    }
+  };
+
+  c.handleExpandKeydown = function($event, job) {
+    if ($event.key === 'Enter' || $event.key === ' ') {
+      $event.preventDefault();
+      c.toggleExpand(job);
+    }
+  };
+
+  // ---- Cleanup ----
+  $scope.$on('$destroy', function() {
+    if (refreshTimer) {
+      $interval.cancel(refreshTimer);
+    }
+    if (toastTimer) {
+      $timeout.cancel(toastTimer);
+    }
+  });
+
+  // ---- Watch for server-pushed data changes ----
+  $scope.$watch('c.data.jobs', function(newVal) {
+    if (newVal && newVal.length) {
+      c.allJobs = newVal;
+      processJobs();
+      buildSummaryStats();
+      c.applyFilters();
+    }
+  });
+
+  // Initialize
+  init();
+};]]></client_script>
+<controller_as>c</controller_as>
+<css>/* ====================================
+   Scheduled Job Status Tracker Widget
+   ==================================== */
+
+.sjst-widget {
+  --sjst-bg-primary: #ffffff;
+  --sjst-bg-secondary: #f8f9fa;
+  --sjst-bg-dark: #1b2a4a;
+  --sjst-text-primary: #212529;
+  --sjst-text-secondary: #6c757d;
+  --sjst-text-inverse: #ffffff;
+  --sjst-border-color: #dee2e6;
+  --sjst-border-radius: 6px;
+  --sjst-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --sjst-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --sjst-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.15);
+  --sjst-color-success: #28a745;
+  --sjst-color-success-bg: #d4edda;
+  --sjst-color-warning: #ffc107;
+  --sjst-color-warning-bg: #fff3cd;
+  --sjst-color-error: #dc3545;
+  --sjst-color-error-bg: #f8d7da;
+  --sjst-color-running: #007bff;
+  --sjst-color-running-bg: #cce5ff;
+  --sjst-color-ready: #17a2b8;
+  --sjst-color-ready-bg: #d1ecf1;
+  --sjst-color-queued: #6f42c1;
+  --sjst-color-queued-bg: #e8daef;
+  --sjst-transition-fast: 0.15s ease;
+  --sjst-transition-normal: 0.25s ease;
+  --sjst-focus-ring: 0 0 0 2px #007bff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: var(--sjst-text-primary);
+  position: relative;
+  padding: 0 0 24px 0;
+}
+
+/* Focus visible for accessibility */
+.sjst-widget *:focus-visible {
+  outline: 2px solid #007bff;
+  outline-offset: 2px;
+}
+
+.sjst-widget *:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ---- Header ---- */
+.sjst-header {
+  background: var(--sjst-bg-dark);
+  color: var(--sjst-text-inverse);
+  padding: 20px 24px 14px;
+  border-radius: var(--sjst-border-radius) var(--sjst-border-radius) 0 0;
+  margin-bottom: 0;
+}
+
+.sjst-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.sjst-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--sjst-text-inverse);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sjst-title-icon {
+  font-size: 24px;
+  opacity: 0.85;
+}
+
+.sjst-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sjst-select {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: var(--sjst-text-inverse);
+  border-radius: var(--sjst-border-radius);
+  padding: 6px 12px;
+  font-size: 13px;
+  height: auto;
+  min-width: 140px;
+  transition: border-color var(--sjst-transition-fast);
+}
+
+.sjst-select:focus {
+  border-color: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.sjst-select option {
+  color: #333;
+  background: #fff;
+}
+
+.sjst-btn {
+  border-radius: var(--sjst-border-radius);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 14px;
+  min-height: 36px;
+  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all var(--sjst-transition-fast);
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.sjst-btn-refresh {
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--sjst-text-inverse);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.sjst-btn-refresh:hover,
+.sjst-btn-refresh:focus {
+  background: rgba(255, 255, 255, 0.25);
+  color: var(--sjst-text-inverse);
+}
+
+.sjst-btn-export {
+  background: var(--sjst-color-success);
+  color: var(--sjst-text-inverse);
+}
+
+.sjst-btn-export:hover,
+.sjst-btn-export:focus {
+  background: #218838;
+  color: var(--sjst-text-inverse);
+}
+
+.sjst-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sjst-last-updated {
+  font-size: 12px;
+  opacity: 0.7;
+  margin-top: 8px;
+}
+
+.sjst-loading-text {
+  color: var(--sjst-color-warning);
+}
+
+/* ---- Summary Statistics ---- */
+.sjst-summary-section {
+  background: var(--sjst-bg-secondary);
+  padding: 20px 24px;
+  border-left: 1px solid var(--sjst-border-color);
+  border-right: 1px solid var(--sjst-border-color);
+}
+
+.sjst-stat-col {
+  margin-bottom: 12px;
+}
+
+.sjst-stat-card {
+  background: var(--sjst-bg-primary);
+  border-radius: var(--sjst-border-radius);
+  padding: 16px 18px;
+  box-shadow: var(--sjst-shadow-sm);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  cursor: pointer;
+  transition: all var(--sjst-transition-normal);
+  border-left: 4px solid transparent;
+  position: relative;
+  overflow: hidden;
+  min-height: 80px;
+}
+
+.sjst-stat-card:hover {
+  box-shadow: var(--sjst-shadow-md);
+  transform: translateY(-2px);
+}
+
+.sjst-stat-card:focus-visible {
+  outline: 2px solid #007bff;
+  outline-offset: 2px;
+}
+
+.sjst-stat-executing { border-left-color: var(--sjst-color-running); }
+.sjst-stat-ready { border-left-color: var(--sjst-color-ready); }
+.sjst-stat-queued { border-left-color: var(--sjst-color-queued); }
+.sjst-stat-complete { border-left-color: var(--sjst-color-success); }
+.sjst-stat-error { border-left-color: var(--sjst-color-error); }
+.sjst-stat-total { border-left-color: var(--sjst-bg-dark); }
+
+.sjst-stat-icon-wrap {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.sjst-stat-executing .sjst-stat-icon-wrap { background: var(--sjst-color-running-bg); color: var(--sjst-color-running); }
+.sjst-stat-ready .sjst-stat-icon-wrap { background: var(--sjst-color-ready-bg); color: var(--sjst-color-ready); }
+.sjst-stat-queued .sjst-stat-icon-wrap { background: var(--sjst-color-queued-bg); color: var(--sjst-color-queued); }
+.sjst-stat-complete .sjst-stat-icon-wrap { background: var(--sjst-color-success-bg); color: var(--sjst-color-success); }
+.sjst-stat-error .sjst-stat-icon-wrap { background: var(--sjst-color-error-bg); color: var(--sjst-color-error); }
+.sjst-stat-total .sjst-stat-icon-wrap { background: #e2e3e5; color: var(--sjst-bg-dark); }
+
+.sjst-stat-details {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.sjst-stat-count {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--sjst-text-primary);
+}
+
+.sjst-stat-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--sjst-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sjst-stat-pct {
+  font-size: 12px;
+  color: var(--sjst-text-secondary);
+  font-weight: 600;
+}
+
+.sjst-stat-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--sjst-bg-secondary);
+}
+
+.sjst-stat-bar-fill {
+  height: 100%;
+  transition: width 0.6s ease;
+  border-radius: 0 3px 3px 0;
+}
+
+.sjst-stat-executing .sjst-stat-bar-fill { background: var(--sjst-color-running); }
+.sjst-stat-ready .sjst-stat-bar-fill { background: var(--sjst-color-ready); }
+.sjst-stat-queued .sjst-stat-bar-fill { background: var(--sjst-color-queued); }
+.sjst-stat-complete .sjst-stat-bar-fill { background: var(--sjst-color-success); }
+.sjst-stat-error .sjst-stat-bar-fill { background: var(--sjst-color-error); }
+.sjst-stat-total .sjst-stat-bar-fill { background: var(--sjst-bg-dark); }
+
+/* ---- Filter Bar ---- */
+.sjst-filter-bar {
+  background: var(--sjst-bg-primary);
+  padding: 16px 24px;
+  border: 1px solid var(--sjst-border-color);
+  border-top: none;
+}
+
+.sjst-filter-bar .row {
+  align-items: center;
+  gap: 0;
+}
+
+.sjst-filter-bar .sjst-select {
+  background: var(--sjst-bg-primary);
+  color: var(--sjst-text-primary);
+  border-color: var(--sjst-border-color);
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.sjst-search-wrap {
+  position: relative;
+  margin-bottom: 8px;
+}
+
+.sjst-search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--sjst-text-secondary);
+  font-size: 14px;
+  z-index: 1;
+}
+
+.sjst-search-input {
+  padding-left: 36px;
+  padding-right: 32px;
+  border-radius: var(--sjst-border-radius);
+  border: 1px solid var(--sjst-border-color);
+  height: 38px;
+  font-size: 14px;
+  transition: border-color var(--sjst-transition-fast);
+}
+
+.sjst-search-input:focus {
+  border-color: var(--sjst-color-running);
+  box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.15);
+}
+
+.sjst-search-clear {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--sjst-text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  font-size: 14px;
+  min-width: 28px;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sjst-search-clear:hover {
+  color: var(--sjst-color-error);
+}
+
+.sjst-btn-sort-dir {
+  background: var(--sjst-bg-secondary);
+  border: 1px solid var(--sjst-border-color);
+  color: var(--sjst-text-primary);
+  width: 100%;
+  justify-content: center;
+  margin-bottom: 8px;
+  min-height: 38px;
+}
+
+.sjst-btn-sort-dir:hover {
+  background: var(--sjst-border-color);
+}
+
+.sjst-filter-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--sjst-border-color);
+}
+
+.sjst-filter-badge {
+  background: var(--sjst-color-running-bg);
+  color: var(--sjst-color-running);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sjst-filter-remove {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  min-width: 20px;
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sjst-filter-remove:hover {
+  opacity: 0.7;
+}
+
+.sjst-result-count {
+  font-size: 12px;
+  color: var(--sjst-text-secondary);
+}
+
+.sjst-btn-primary {
+  background: var(--sjst-color-running);
+  color: var(--sjst-text-inverse);
+  border-color: var(--sjst-color-running);
+}
+
+.sjst-btn-primary:hover {
+  background: #0069d9;
+  color: var(--sjst-text-inverse);
+}
+
+/* ---- Loading Overlay ---- */
+.sjst-loading-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 24px;
+  background: var(--sjst-bg-primary);
+  border: 1px solid var(--sjst-border-color);
+  border-top: none;
+}
+
+.sjst-spinner-wrap {
+  text-align: center;
+}
+
+.sjst-spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid var(--sjst-border-color);
+  border-top-color: var(--sjst-color-running);
+  border-radius: 50%;
+  animation: sjst-spin 0.8s linear infinite;
+  margin: 0 auto 16px;
+}
+
+@keyframes sjst-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sjst-spinner {
+    animation: none;
+    border-top-color: var(--sjst-color-running);
+    opacity: 0.7;
+  }
+  .sjst-stat-card:hover {
+    transform: none;
+  }
+  .sjst-stat-bar-fill {
+    transition: none;
+  }
+  .sjst-toast {
+    transition: none !important;
+  }
+  .sjst-detail-panel {
+    animation: none !important;
+  }
+}
+
+.sjst-loading-msg {
+  font-size: 14px;
+  color: var(--sjst-text-secondary);
+  margin: 0;
+}
+
+/* ---- No Results ---- */
+.sjst-no-results {
+  text-align: center;
+  padding: 60px 24px;
+  background: var(--sjst-bg-primary);
+  border: 1px solid var(--sjst-border-color);
+  border-top: none;
+}
+
+.sjst-no-results-icon {
+  font-size: 48px;
+  color: var(--sjst-border-color);
+  margin-bottom: 16px;
+}
+
+.sjst-no-results-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.sjst-no-results-text {
+  font-size: 14px;
+  color: var(--sjst-text-secondary);
+  margin: 0 0 16px;
+}
+
+/* ---- Table ---- */
+.sjst-table-section {
+  border: 1px solid var(--sjst-border-color);
+  border-top: none;
+  background: var(--sjst-bg-primary);
+}
+
+.sjst-table-responsive {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.sjst-table {
+  margin-bottom: 0;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.sjst-th {
+  background: var(--sjst-bg-secondary);
+  color: var(--sjst-text-secondary);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 10px 12px;
+  border-bottom: 2px solid var(--sjst-border-color);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--sjst-transition-fast);
+}
+
+.sjst-th:hover {
+  background: #e9ecef;
+}
+
+.sjst-th-expand {
+  width: 40px;
+  cursor: default;
+}
+
+.sjst-th-expand:hover {
+  background: var(--sjst-bg-secondary);
+}
+
+.sjst-td {
+  padding: 12px;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--sjst-border-color);
+}
+
+.sjst-row {
+  transition: background var(--sjst-transition-fast);
+}
+
+.sjst-row:hover {
+  background: rgba(0, 123, 255, 0.03);
+}
+
+.sjst-row-expanded {
+  background: rgba(0, 123, 255, 0.05) !important;
+}
+
+/* Row state indicator on left */
+.sjst-row-error .sjst-td:first-child {
+  box-shadow: inset 3px 0 0 var(--sjst-color-error);
+}
+
+.sjst-row-executing .sjst-td:first-child {
+  box-shadow: inset 3px 0 0 var(--sjst-color-running);
+}
+
+.sjst-row-queued .sjst-td:first-child {
+  box-shadow: inset 3px 0 0 var(--sjst-color-queued);
+}
+
+.sjst-row-ready .sjst-td:first-child {
+  box-shadow: inset 3px 0 0 var(--sjst-color-ready);
+}
+
+/* ---- Expand Button ---- */
+.sjst-expand-btn {
+  background: none;
+  border: none;
+  color: var(--sjst-text-secondary);
+  cursor: pointer;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all var(--sjst-transition-fast);
+  font-size: 12px;
+}
+
+.sjst-expand-btn:hover {
+  background: var(--sjst-bg-secondary);
+  color: var(--sjst-text-primary);
+}
+
+/* ---- Status Badges ---- */
+.sjst-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.sjst-status-executing {
+  background: var(--sjst-color-running-bg);
+  color: #004085;
+}
+
+.sjst-status-ready {
+  background: var(--sjst-color-ready-bg);
+  color: #0c5460;
+}
+
+.sjst-status-queued {
+  background: var(--sjst-color-queued-bg);
+  color: #4a235a;
+}
+
+.sjst-status-complete {
+  background: var(--sjst-color-success-bg);
+  color: #155724;
+}
+
+.sjst-status-error {
+  background: var(--sjst-color-error-bg);
+  color: #721c24;
+}
+
+.sjst-status-text {
+  font-size: 11px;
+}
+
+/* ---- Job Name ---- */
+.sjst-job-name {
+  font-weight: 600;
+  color: var(--sjst-text-primary);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sjst-type-badge {
+  font-size: 10px;
+  background: var(--sjst-bg-secondary);
+  color: var(--sjst-text-secondary);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.sjst-text-muted {
+  color: var(--sjst-text-secondary);
+  font-style: italic;
+  font-size: 12px;
+}
+
+/* ---- Success Rate Bar ---- */
+.sjst-success-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 100px;
+}
+
+.sjst-success-bar {
+  flex: 1;
+  height: 6px;
+  background: #e9ecef;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.sjst-success-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.sjst-rate-good { background: var(--sjst-color-success); }
+.sjst-rate-warn { background: var(--sjst-color-warning); }
+.sjst-rate-bad { background: var(--sjst-color-error); }
+
+.sjst-success-pct {
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 36px;
+  text-align: right;
+  color: var(--sjst-text-primary);
+}
+
+/* ---- Action Buttons ---- */
+.sjst-action-btns {
+  display: flex;
+  gap: 4px;
+}
+
+.sjst-action-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  border: 1px solid var(--sjst-border-color);
+  background: var(--sjst-bg-primary);
+  color: var(--sjst-text-secondary);
+  cursor: pointer;
+  transition: all var(--sjst-transition-fast);
+  font-size: 13px;
+}
+
+.sjst-action-run:hover:not(:disabled) {
+  background: var(--sjst-color-success);
+  color: var(--sjst-text-inverse);
+  border-color: var(--sjst-color-success);
+}
+
+.sjst-action-cancel:hover:not(:disabled) {
+  background: var(--sjst-color-error);
+  color: var(--sjst-text-inverse);
+  border-color: var(--sjst-color-error);
+}
+
+.sjst-action-view:hover:not(:disabled) {
+  background: var(--sjst-color-running);
+  color: var(--sjst-text-inverse);
+  border-color: var(--sjst-color-running);
+}
+
+.sjst-action-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ---- Detail Panel ---- */
+.sjst-detail-row {
+  background: var(--sjst-bg-secondary) !important;
+}
+
+.sjst-detail-cell {
+  padding: 0 !important;
+  border-bottom: 2px solid var(--sjst-border-color);
+}
+
+.sjst-detail-panel {
+  padding: 20px 24px;
+  animation: sjst-slideDown 0.25s ease;
+}
+
+@keyframes sjst-slideDown {
+  from {
+    opacity: 0;
+    max-height: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    max-height: 2000px;
+    transform: translateY(0);
+  }
+}
+
+.sjst-detail-loading {
+  text-align: center;
+  padding: 24px;
+  color: var(--sjst-text-secondary);
+  font-size: 14px;
+}
+
+.sjst-detail-heading {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--sjst-text-primary);
+  margin: 0 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--sjst-border-color);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.sjst-detail-heading-error {
+  color: var(--sjst-color-error);
+  border-bottom-color: var(--sjst-color-error);
+}
+
+.sjst-detail-list {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 4px 12px;
+  margin: 0 0 16px;
+  font-size: 13px;
+}
+
+.sjst-detail-list dt {
+  font-weight: 600;
+  color: var(--sjst-text-secondary);
+}
+
+.sjst-detail-list dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.sjst-text-success {
+  color: var(--sjst-color-success);
+  font-weight: 600;
+}
+
+.sjst-text-error {
+  color: var(--sjst-color-error);
+  font-weight: 600;
+}
+
+.sjst-active-badge {
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.sjst-active-yes {
+  background: var(--sjst-color-success-bg);
+  color: #155724;
+}
+
+.sjst-active-no {
+  background: var(--sjst-color-error-bg);
+  color: #721c24;
+}
+
+/* ---- Error Logs ---- */
+.sjst-error-section {
+  margin-top: 16px;
+}
+
+.sjst-error-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--sjst-border-color);
+  border-radius: var(--sjst-border-radius);
+}
+
+.sjst-error-item {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--sjst-border-color);
+}
+
+.sjst-error-item:last-child {
+  border-bottom: none;
+}
+
+.sjst-error-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.sjst-error-level {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.sjst-error-level-error {
+  background: var(--sjst-color-error-bg);
+  color: #721c24;
+}
+
+.sjst-error-level-warning {
+  background: var(--sjst-color-warning-bg);
+  color: #856404;
+}
+
+.sjst-error-time {
+  font-size: 11px;
+  color: var(--sjst-text-secondary);
+}
+
+.sjst-error-message {
+  background: #1b2a4a;
+  color: #e9ecef;
+  padding: 10px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+/* ---- History Table ---- */
+.sjst-history-section {
+  margin-top: 16px;
+}
+
+.sjst-history-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--sjst-border-color);
+  border-radius: var(--sjst-border-radius);
+}
+
+.sjst-history-table {
+  margin: 0;
+  font-size: 12px;
+}
+
+.sjst-history-table th {
+  background: #e9ecef;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+
+.sjst-history-table td {
+  padding: 8px 10px;
+  vertical-align: top;
+}
+
+.sjst-history-msg {
+  max-width: 250px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sjst-mini-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sjst-mini-complete { background: var(--sjst-color-success-bg); color: #155724; }
+.sjst-mini-error { background: var(--sjst-color-error-bg); color: #721c24; }
+.sjst-mini-executing { background: var(--sjst-color-running-bg); color: #004085; }
+.sjst-mini-ready { background: var(--sjst-color-ready-bg); color: #0c5460; }
+
+/* ---- Dependencies ---- */
+.sjst-deps-section {
+  margin-top: 16px;
+}
+
+.sjst-dep-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sjst-dep-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: var(--sjst-bg-primary);
+  border: 1px solid var(--sjst-border-color);
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--sjst-text-secondary);
+}
+
+/* ---- Pagination ---- */
+.sjst-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--sjst-border-color);
+}
+
+.sjst-page-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--sjst-border-color);
+  background: var(--sjst-bg-primary);
+  border-radius: var(--sjst-border-radius);
+  cursor: pointer;
+  transition: all var(--sjst-transition-fast);
+  color: var(--sjst-text-primary);
+}
+
+.sjst-page-btn:hover:not(:disabled) {
+  background: var(--sjst-color-running);
+  color: var(--sjst-text-inverse);
+  border-color: var(--sjst-color-running);
+}
+
+.sjst-page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sjst-page-info {
+  font-size: 13px;
+  color: var(--sjst-text-secondary);
+  font-weight: 500;
+}
+
+/* ---- Toast ---- */
+.sjst-toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 14px 20px;
+  border-radius: var(--sjst-border-radius);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 10000;
+  transform: translateY(100px);
+  opacity: 0;
+  transition: all 0.3s ease;
+  box-shadow: var(--sjst-shadow-lg);
+  max-width: 400px;
+  pointer-events: none;
+}
+
+.sjst-toast-show {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sjst-toast-success {
+  background: var(--sjst-color-success);
+  color: var(--sjst-text-inverse);
+}
+
+.sjst-toast-error {
+  background: var(--sjst-color-error);
+  color: var(--sjst-text-inverse);
+}
+
+.sjst-toast-info {
+  background: var(--sjst-color-running);
+  color: var(--sjst-text-inverse);
+}
+
+.sjst-toast-close {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 4px;
+  margin-left: auto;
+  opacity: 0.8;
+  min-width: 28px;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sjst-toast-close:hover {
+  opacity: 1;
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 991px) {
+  .sjst-title {
+    font-size: 18px;
+  }
+
+  .sjst-btn-text {
+    display: none;
+  }
+
+  .sjst-header-actions {
+    gap: 6px;
+  }
+
+  .sjst-job-name {
+    max-width: 180px;
+  }
+
+  .sjst-detail-list {
+    grid-template-columns: 120px 1fr;
+  }
+}
+
+@media (max-width: 767px) {
+  .sjst-header {
+    padding: 14px 16px 10px;
+  }
+
+  .sjst-title-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .sjst-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .sjst-summary-section {
+    padding: 12px 16px;
+  }
+
+  .sjst-filter-bar {
+    padding: 12px 16px;
+  }
+
+  .sjst-table {
+    font-size: 12px;
+  }
+
+  .sjst-th,
+  .sjst-td {
+    padding: 8px 6px;
+  }
+
+  .sjst-th-duration,
+  .sjst-td-duration,
+  .sjst-th-success,
+  .sjst-td-success {
+    display: none;
+  }
+
+  .sjst-job-name {
+    max-width: 140px;
+    font-size: 12px;
+  }
+
+  .sjst-detail-panel {
+    padding: 14px 16px;
+  }
+
+  .sjst-detail-list {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .sjst-detail-list dt {
+    margin-top: 8px;
+  }
+
+  .sjst-action-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .sjst-toast {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    max-width: none;
+  }
+
+  .sjst-expand-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .sjst-refresh-control {
+    width: 100%;
+  }
+
+  .sjst-select {
+    min-width: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .sjst-title {
+    font-size: 16px;
+  }
+
+  .sjst-stat-count {
+    font-size: 22px;
+  }
+
+  .sjst-th-lastrun,
+  .sjst-td-lastrun,
+  .sjst-th-nextrun,
+  .sjst-td-nextrun {
+    display: none;
+  }
+}</css>
+<data_table>sp_instance</data_table>
+<demo_data/>
+<description>WIDGET REQUIREMENTS SPECIFICATION
+
+Widget Name: Scheduled Job Status Tracker
+
+Purpose: 
+This widget provides system administrators with real-time visibility into scheduled job execution status across </description>
+<docs display_value=""/>
+<field_list/>
+<has_preview>false</has_preview>
+<id>scheduled_job_status_tracker_962ce51e</id>
+<internal>false</internal>
+<link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+<name>Scheduled Job Status Tracker</name>
+<option_schema/>
+<public>true</public>
+<roles/>
+<script><![CDATA[(function() {
+  // ---- Role & ACL Validation ----
+  var userHasAdmin = gs.hasRole('admin') || gs.hasRole('scheduled_job_admin');
+  data.isAdmin = userHasAdmin;
+
+  // ---- Handle Client Requests ----
+  if (input) {
+    var action = input.action || '';
+
+    if (action === 'refresh') {
+      data.jobs = getScheduledJobs(input.searchTerm, input.statusFilter, input.page, input.pageSize);
+      data.stateCounts = getStateCounts();
+      return;
+    }
+
+    if (action === 'getJobDetail') {
+      data.jobDetail = getJobDetail(input.jobSysId, input.jobName);
+      return;
+    }
+
+    if (action === 'triggerJob') {
+      if (!userHasAdmin) {
+        data.success = false;
+        data.errorMsg = 'Insufficient permissions to trigger jobs.';
+        return;
+      }
+      data.success = triggerJob(input.jobSysId);
+      if (!data.success) {
+        data.errorMsg = 'Failed to trigger the scheduled job.';
+      }
+      return;
+    }
+
+    if (action === 'cancelJob') {
+      if (!userHasAdmin) {
+        data.success = false;
+        data.errorMsg = 'Insufficient permissions to cancel jobs.';
+        return;
+      }
+      data.success = cancelJob(input.triggerSysId);
+      if (!data.success) {
+        data.errorMsg = 'Failed to cancel the running job.';
+      }
+      return;
+    }
+  }
+
+  // ---- Initial Load ----
+  data.jobs = getScheduledJobs('', '', 1, 100);
+  data.stateCounts = getStateCounts();
+
+  // ==================================================
+  // FUNCTION: getScheduledJobs
+  // Queries sysauto_script and joins with sys_trigger
+  // ==================================================
+  function getScheduledJobs(searchTerm, statusFilter, page, pageSize) {
+    var jobs = [];
+    pageSize = parseInt(pageSize, 10) || 100;
+    page = parseInt(page, 10) || 1;
+
+    // Build map of trigger info for scheduled jobs
+    var triggerMap = {};
+    var grTrigger = new GlideRecord('sys_trigger');
+    grTrigger.addQuery('trigger_type', '0'); // Scheduled trigger type
+    grTrigger.addNotNullQuery('document_key');
+    grTrigger.orderByDesc('sys_updated_on');
+    grTrigger.setLimit(500);
+    grTrigger.query();
+
+    while (grTrigger.next()) {
+      var docKey = grTrigger.getValue('document_key');
+      if (!triggerMap[docKey]) {
+        triggerMap[docKey] = {
+          trigger_sys_id: grTrigger.getUniqueValue(),
+          state: grTrigger.getValue('state'),
+          next_action: grTrigger.getValue('next_action'),
+          claimed_by: grTrigger.getDisplayValue('claimed_by'),
+          job_context: grTrigger.getValue('job_context')
+        };
+      }
+    }
+
+    // Get execution stats (7-day aggregates)
+    var execStats = getExecutionStats();
+
+    // Query sysauto_script
+    var gr = new GlideRecord('sysauto_script');
+    gr.addActiveQuery();
+
+    // Apply search filter on server side
+    if (searchTerm) {
+      var qc = gr.addQuery('name', 'CONTAINS', searchTerm);
+      qc.addOrCondition('sys_id', 'CONTAINS', searchTerm);
+      qc.addOrCondition('run_type', 'CONTAINS', searchTerm);
+    }
+
+    gr.orderByDesc('sys_updated_on');
+    gr.setLimit(pageSize);
+
+    // Offset for pagination
+    if (page > 1) {
+      gr.chooseWindow((page - 1) * pageSize, page * pageSize);
+    }
+
+    gr.query();
+
+    while (gr.next()) {
+      var sysId = gr.getUniqueValue();
+      var triggerInfo = triggerMap[sysId] || {};
+      var stats = execStats[sysId] || {};
+
+      // Determine trigger state
+      var triggerState = triggerInfo.state || '0';
+
+      // Apply status filter
+      var stateKeyMap = { '0': 'ready', '1': 'executing', '2': 'complete', '-1': 'error', '3': 'queued' };
+      var stateKey = stateKeyMap[triggerState] || 'ready';
+
+      if (statusFilter && stateKey !== statusFilter) {
+        continue;
+      }
+
+      var jobObj = {
+        sys_id: sysId,
+        name: gr.getDisplayValue('name'),
+        active: gr.getValue('active') === 'true' || gr.getValue('active') === '1',
+        run_type: gr.getDisplayValue('run_type'),
+        run_start: gr.getValue('run_start'),
+        run_time: gr.getValue('run_time'),
+        run_dayofweek: gr.getValue('run_dayofweek'),
+        run_dayofmonth: gr.getValue('run_dayofmonth'),
+        sys_created_on: gr.getValue('sys_created_on'),
+        sys_updated_on: gr.getValue('sys_updated_on'),
+        trigger_state: triggerState,
+        trigger_sys_id: triggerInfo.trigger_sys_id || '',
+        next_action: triggerInfo.next_action || '',
+        claimed_by: triggerInfo.claimed_by || '',
+        last_run: getLastRunTime(sysId),
+        avg_duration: stats.avg_duration || null,
+        success_rate: stats.success_rate !== undefined ? stats.success_rate : null,
+        execution_count: stats.total_count || 0,
+        success_count: stats.success_count || 0,
+        failure_count: stats.failure_count || 0,
+        last_error: stats.last_error || ''
+      };
+
+      jobs.push(jobObj);
+    }
+
+    return jobs;
+  }
+
+  // ==================================================
+  // FUNCTION: getStateCounts
+  // Uses GlideAggregate on sys_trigger for summary stats
+  // ==================================================
+  function getStateCounts() {
+    var counts = { executing: 0, ready: 0, queued: 0, complete: 0, error: 0 };
+
+    var ga = new GlideAggregate('sys_trigger');
+    ga.addQuery('trigger_type', '0');
+    ga.addNotNullQuery('document_key');
+    ga.addAggregate('COUNT', 'state');
+    ga.groupBy('state');
+    ga.query();
+
+    var stateKeyMap = { '0': 'ready', '1': 'executing', '2': 'complete', '-1': 'error', '3': 'queued' };
+
+    while (ga.next()) {
+      var state = ga.getValue('state');
+      var count = parseInt(ga.getAggregate('COUNT', 'state'), 10) || 0;
+      var key = stateKeyMap[state];
+      if (key) {
+        counts[key] = count;
+      }
+    }
+
+    return counts;
+  }
+
+  // ==================================================
+  // FUNCTION: getExecutionStats
+  // 7-day execution stats from sys_execution_tracker
+  // ==================================================
+  function getExecutionStats() {
+    var stats = {};
+    var sevenDaysAgo = new GlideDateTime();
+    sevenDaysAgo.addDaysUTC(-7);
+
+    // Get aggregate counts grouped by source
+    var ga = new GlideAggregate('sys_execution_tracker');
+    ga.addQuery('sys_created_on', '>=', sevenDaysAgo);
+    ga.addAggregate('COUNT');
+    ga.addAggregate('AVG', 'duration');
+    ga.groupBy('source');
+    ga.query();
+
+    while (ga.next()) {
+      var source = ga.getValue('source') || '';
+      stats[source] = {
+        total_count: parseInt(ga.getAggregate('COUNT'), 10) || 0,
+        avg_duration: parseFloat(ga.getAggregate('AVG', 'duration')) || 0,
+        success_count: 0,
+        failure_count: 0,
+        success_rate: 0,
+        last_error: ''
+      };
+    }
+
+    // Get success/failure counts
+    var gaSuccess = new GlideAggregate('sys_execution_tracker');
+    gaSuccess.addQuery('sys_created_on', '>=', sevenDaysAgo);
+    gaSuccess.addQuery('completion_code', 'Success');
+    gaSuccess.addAggregate('COUNT');
+    gaSuccess.groupBy('source');
+    gaSuccess.query();
+
+    while (gaSuccess.next()) {
+      var srcSuccess = gaSuccess.getValue('source') || '';
+      if (stats[srcSuccess]) {
+        stats[srcSuccess].success_count = parseInt(gaSuccess.getAggregate('COUNT'), 10) || 0;
+      }
+    }
+
+    var gaFail = new GlideAggregate('sys_execution_tracker');
+    gaFail.addQuery('sys_created_on', '>=', sevenDaysAgo);
+    gaFail.addQuery('completion_code', '!=', 'Success');
+    gaFail.addNotNullQuery('completion_code');
+    gaFail.addAggregate('COUNT');
+    gaFail.groupBy('source');
+    gaFail.query();
+
+    while (gaFail.next()) {
+      var srcFail = gaFail.getValue('source') || '';
+      if (stats[srcFail]) {
+        stats[srcFail].failure_count = parseInt(gaFail.getAggregate('COUNT'), 10) || 0;
+      }
+    }
+
+    // Calculate success rates
+    Object.keys(stats).forEach(function(key) {
+      var s = stats[key];
+      if (s.total_count > 0) {
+        s.success_rate = Math.round((s.success_count / s.total_count) * 100);
+      }
+    });
+
+    // Map by sys_id from sysauto_script name matching
+    var statsBySysId = {};
+    var grJob = new GlideRecord('sysauto_script');
+    grJob.addActiveQuery();
+    grJob.setLimit(500);
+    grJob.query();
+    while (grJob.next()) {
+      var jobName = grJob.getValue('name');
+      var jobId = grJob.getUniqueValue();
+      // Match by source = sys_id or source = name
+      if (stats[jobId]) {
+        statsBySysId[jobId] = stats[jobId];
+      } else if (stats[jobName]) {
+        statsBySysId[jobId] = stats[jobName];
+      }
+    }
+
+    return statsBySysId;
+  }
+
+  // ==================================================
+  // FUNCTION: getLastRunTime
+  // Gets most recent execution time for a job
+  // ==================================================
+  function getLastRunTime(jobSysId) {
+    var grExec = new GlideRecord('sys_execution_tracker');
+    grExec.addQuery('source', jobSysId);
+    grExec.orderByDesc('sys_created_on');
+    grExec.setLimit(1);
+    grExec.query();
+    if (grExec.next()) {
+      return grExec.getValue('sys_created_on');
+    }
+
+    // Fallback: check by name
+    var grJob = new GlideRecord('sysauto_script');
+    if (grJob.get(jobSysId)) {
+      var grExec2 = new GlideRecord('sys_execution_tracker');
+      grExec2.addQuery('name', 'CONTAINS', grJob.getValue('name'));
+      grExec2.orderByDesc('sys_created_on');
+      grExec2.setLimit(1);
+      grExec2.query();
+      if (grExec2.next()) {
+        return grExec2.getValue('sys_created_on');
+      }
+    }
+
+    return '';
+  }
+
+  // ==================================================
+  // FUNCTION: getJobDetail
+  // Fetches detailed info for expanded panel
+  // ==================================================
+  function getJobDetail(jobSysId, jobName) {
+    var detail = {
+      error_logs: [],
+      execution_history: [],
+      dependencies: [],
+      execution_count: 0,
+      success_count: 0,
+      failure_count: 0,
+      last_error: ''
+    };
+
+    if (!jobSysId) return detail;
+
+    // Get error logs from syslog
+    var oneDayAgo = new GlideDateTime();
+    oneDayAgo.addDaysUTC(-1);
+
+    var grLog = new GlideRecord('syslog');
+    grLog.addQuery('level', 'IN', '0,1,2'); // Error, Warning, Critical
+    var logQc = grLog.addQuery('source', 'CONTAINS', jobName || '');
+    logQc.addOrCondition('source', 'CONTAINS', jobSysId);
+    grLog.addQuery('sys_created_on', '>=', oneDayAgo);
+    grLog.orderByDesc('sys_created_on');
+    grLog.setLimit(20);
+    grLog.query();
+
+    while (grLog.next()) {
+      var levelVal = grLog.getValue('level');
+      var levelDisplay = 'info';
+      if (levelVal === '0') levelDisplay = 'error';
+      else if (levelVal === '1') levelDisplay = 'error';
+      else if (levelVal === '2') levelDisplay = 'warning';
+
+      detail.error_logs.push({
+        sys_id: grLog.getUniqueValue(),
+        level: levelDisplay,
+        message: grLog.getValue('message') || '',
+        source: grLog.getValue('source') || '',
+        created_on: grLog.getValue('sys_created_on')
+      });
+    }
+
+    // Get execution history from sys_execution_tracker
+    var grExec = new GlideRecord('sys_execution_tracker');
+    var execQc = grExec.addQuery('source', jobSysId);
+    execQc.addOrCondition('name', 'CONTAINS', jobName || '');
+    grExec.addQuery('sys_created_on', '>=', oneDayAgo);
+    grExec.orderByDesc('sys_created_on');
+    grExec.setLimit(25);
+    grExec.query();
+
+    var successCount = 0;
+    var failCount = 0;
+
+    while (grExec.next()) {
+      var completionCode = grExec.getValue('completion_code') || '';
+      var stateVal = grExec.getValue('state');
+      var stateCodeMap = { 'Pending': '0', 'Running': '1', 'Complete': '2', 'Cancelled': '-1' };
+      var stateCode = stateCodeMap[stateVal] || '0';
+
+      if (completionCode === 'Success') {
+        successCount++;
+      } else if (completionCode && completionCode !== 'Success') {
+        failCount++;
+      }
+
+      detail.execution_history.push({
+        sys_id: grExec.getUniqueValue(),
+        state: grExec.getDisplayValue('state') || stateVal,
+        state_code: stateCode,
+        result: grExec.getValue('completion_code') || '',
+        duration: grExec.getValue('duration') || '',
+        message: grExec.getValue('message') || '',
+        error_string: grExec.getValue('error_string') || '',
+        percent_complete: grExec.getValue('percent_complete') || '',
+        created_on: grExec.getValue('sys_created_on')
+      });
+    }
+
+    detail.execution_count = detail.execution_history.length;
+    detail.success_count = successCount;
+    detail.failure_count = failCount;
+
+    // Get last error message
+    if (failCount > 0) {
+      for (var i = 0; i < detail.execution_history.length; i++) {
+        if (detail.execution_history[i].error_string) {
+          detail.last_error = detail.execution_history[i].error_string;
+          break;
+        }
+        if (detail.execution_history[i].result && detail.execution_history[i].result !== 'Success') {
+          detail.last_error = detail.execution_history[i].message || detail.execution_history[i].result;
+          break;
+        }
+      }
+    }
+
+    // Get dependencies - check for related business rules or script includes
+    if (userHasAdmin) {
+      var grJob = new GlideRecord('sysauto_script');
+      if (grJob.get(jobSysId)) {
+        var scriptField = grJob.getValue('script') || '';
+
+        // Check for script include references
+        var grSI = new GlideRecord('sys_script_include');
+        grSI.addActiveQuery();
+        grSI.setLimit(10);
+        grSI.query();
+        while (grSI.next()) {
+          var siName = grSI.getValue('name') || '';
+          if (siName && scriptField.indexOf(siName) !== -1) {
+            detail.dependencies.push({
+              name: siName,
+              type: 'Script Include',
+              sys_id: grSI.getUniqueValue()
+            });
+          }
+          if (detail.dependencies.length >= 5) break;
+        }
+
+        // Check for related business rules with same table
+        var jobDesc = grJob.getValue('name') || '';
+        var grBR = new GlideRecord('sys_script');
+        grBR.addActiveQuery();
+        grBR.addQuery('name', 'CONTAINS', jobDesc.split(' ')[0]);
+        grBR.setLimit(5);
+        grBR.query();
+        while (grBR.next()) {
+          detail.dependencies.push({
+            name: grBR.getDisplayValue('name'),
+            type: 'Business Rule',
+            sys_id: grBR.getUniqueValue()
+          });
+        }
+      }
+    }
+
+    return detail;
+  }
+
+  // ==================================================
+  // FUNCTION: triggerJob
+  // Manually triggers a scheduled job execution
+  // ==================================================
+  function triggerJob(jobSysId) {
+    if (!userHasAdmin || !jobSysId) return false;
+
+    try {
+      // Check the job exists and is active
+      var grJob = new GlideRecord('sysauto_script');
+      if (!grJob.get(jobSysId)) return false;
+
+      // Create or update trigger to execute now
+      var grTrigger = new GlideRecord('sys_trigger');
+      grTrigger.addQuery('document_key', jobSysId);
+      grTrigger.addQuery('trigger_type', '0');
+      grTrigger.setLimit(1);
+      grTrigger.query();
+
+      if (grTrigger.next()) {
+        grTrigger.setValue('state', '0'); // Set to Ready
+        grTrigger.setValue('next_action', new GlideDateTime().getDisplayValue());
+        grTrigger.update();
+      } else {
+        // If no trigger exists, set the job to execute
+        var trigger = new GlideRecord('sys_trigger');
+        trigger.initialize();
+        trigger.setValue('name', 'Manual execution: ' + grJob.getValue('name'));
+        trigger.setValue('trigger_type', '0');
+        trigger.setValue('document', 'sysauto_script');
+        trigger.setValue('document_key', jobSysId);
+        trigger.setValue('state', '0');
+        trigger.setValue('next_action', new GlideDateTime().getDisplayValue());
+        trigger.insert();
+      }
+
+      // Audit log
+      gs.info('Scheduled Job manually triggered by ' + gs.getUserName() + ': ' + grJob.getValue('name') + ' (' + jobSysId + ')');
+
+      return true;
+    } catch (e) {
+      gs.error('Error triggering scheduled job: ' + e.message);
+      return false;
+    }
+  }
+
+  // ==================================================
+  // FUNCTION: cancelJob
+  // Cancels a running scheduled job
+  // ==================================================
+  function cancelJob(triggerSysId) {
+    if (!userHasAdmin || !triggerSysId) return false;
+
+    try {
+      var grTrigger = new GlideRecord('sys_trigger');
+      if (grTrigger.get(triggerSysId)) {
+        var jobName = grTrigger.getDisplayValue('name');
+        grTrigger.setValue('state', '4'); // Cancelled state
+        grTrigger.update();
+
+        gs.info('Scheduled Job cancelled by ' + gs.getUserName() + ': ' + jobName + ' (trigger: ' + triggerSysId + ')');
+        return true;
+      }
+      return false;
+    } catch (e) {
+      gs.error('Error cancelling scheduled job: ' + e.message);
+      return false;
+    }
+  }
+
+})();]]></script>
+<servicenow>false</servicenow>
+<sys_class_name>sp_widget</sys_class_name>
+<sys_created_by>admin</sys_created_by>
+<sys_created_on>2026-02-08 09:13:10</sys_created_on>
+<sys_id>39c9693f93fe765013b7326efaba1036</sys_id>
+<sys_mod_count>0</sys_mod_count>
+<sys_name>Scheduled Job Status Tracker</sys_name>
+<sys_package display_value="Global" source="global">global</sys_package>
+<sys_policy/>
+<sys_scope display_value="Global">global</sys_scope>
+<sys_update_name>sp_widget_39c9693f93fe765013b7326efaba1036</sys_update_name>
+<sys_updated_by>admin</sys_updated_by>
+<sys_updated_on>2026-02-08 09:13:10</sys_updated_on>
+<template><![CDATA[<div class="sjst-widget" role="region" aria-label="Scheduled Job Status Tracker">
+  <!-- Header Section -->
+  <div class="sjst-header">
+    <div class="sjst-title-row">
+      <h2 class="sjst-title" tabindex="0">
+        <i class="fa fa-clock-o sjst-title-icon" aria-hidden="true"></i>
+        Scheduled Job Status Tracker
+      </h2>
+      <div class="sjst-header-actions">
+        <div class="sjst-refresh-control">
+          <label for="refreshInterval" class="sr-only">Auto-refresh interval</label>
+          <select id="refreshInterval" class="form-control sjst-select"
+                  ng-model="c.refreshInterval"
+                  ng-change="c.setRefreshInterval()"
+                  aria-label="Select auto-refresh interval">
+            <option value="30000">Refresh: 30s</option>
+            <option value="60000">Refresh: 1m</option>
+            <option value="300000">Refresh: 5m</option>
+            <option value="0">Manual Only</option>
+          </select>
+        </div>
+        <button class="btn sjst-btn sjst-btn-refresh"
+                ng-click="c.refreshData()"
+                ng-disabled="c.loading"
+                aria-label="Refresh job data now"
+                tabindex="0">
+          <i class="fa fa-refresh" ng-class="{'fa-spin': c.loading}" aria-hidden="true"></i>
+          <span class="sjst-btn-text">Refresh</span>
+        </button>
+        <button class="btn sjst-btn sjst-btn-export"
+                ng-click="c.exportCSV()"
+                ng-disabled="c.loading || !c.filteredJobs.length"
+                aria-label="Export job status report as CSV"
+                tabindex="0">
+          <i class="fa fa-download" aria-hidden="true"></i>
+          <span class="sjst-btn-text">Export CSV</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Last Updated Indicator -->
+    <div class="sjst-last-updated" role="status" aria-live="polite">
+      <span ng-if="c.lastUpdated">
+        <i class="fa fa-check-circle" aria-hidden="true"></i>
+        Last updated: {{c.lastUpdated | date:'medium'}}
+      </span>
+      <span ng-if="c.loading" class="sjst-loading-text">
+        <i class="fa fa-spinner fa-spin" aria-hidden="true"></i>
+        Updating...
+      </span>
+    </div>
+  </div>
+
+  <!-- Summary Statistics Cards -->
+  <div class="sjst-summary-section" role="region" aria-label="Job status summary">
+    <h3 class="sr-only">Summary Statistics</h3>
+    <div class="row">
+      <div class="col-12 col-md-6 col-lg-4 sjst-stat-col" ng-repeat="stat in c.summaryStats track by stat.key">
+        <div class="sjst-stat-card sjst-stat-{{stat.key}}"
+             ng-click="c.filterByStatus(stat.key)"
+             ng-keydown="c.handleCardKeydown($event, stat.key)"
+             tabindex="0"
+             role="button"
+             aria-label="{{stat.label}}: {{stat.count}} jobs, {{stat.percentage}}%. Click to filter.">
+          <div class="sjst-stat-icon-wrap">
+            <i class="fa {{stat.icon}}" aria-hidden="true"></i>
+          </div>
+          <div class="sjst-stat-details">
+            <span class="sjst-stat-count">{{stat.count}}</span>
+            <span class="sjst-stat-label">{{stat.label}}</span>
+            <span class="sjst-stat-pct">{{stat.percentage}}%</span>
+          </div>
+          <div class="sjst-stat-bar">
+            <div class="sjst-stat-bar-fill" ng-style="{'width': stat.percentage + '%'}"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Search and Filter Bar -->
+  <div class="sjst-filter-bar" role="search" aria-label="Filter scheduled jobs">
+    <div class="row">
+      <div class="col-12 col-md-5">
+        <div class="sjst-search-wrap">
+          <i class="fa fa-search sjst-search-icon" aria-hidden="true"></i>
+          <label for="jobSearch" class="sr-only">Search jobs by name</label>
+          <input type="text" id="jobSearch"
+                 class="form-control sjst-search-input"
+                 placeholder="Search by job name, source, or type..."
+                 ng-model="c.searchTerm"
+                 ng-model-options="{ debounce: 300 }"
+                 ng-change="c.applyFilters()"
+                 aria-label="Search jobs by name, source, or type">
+          <button class="sjst-search-clear" ng-show="c.searchTerm"
+                  ng-click="c.clearSearch()" aria-label="Clear search">
+            <i class="fa fa-times" aria-hidden="true"></i>
+          </button>
+        </div>
+      </div>
+      <div class="col-12 col-md-3">
+        <label for="statusFilter" class="sr-only">Filter by status</label>
+        <select id="statusFilter" class="form-control sjst-select"
+                ng-model="c.statusFilter"
+                ng-change="c.applyFilters()"
+                aria-label="Filter jobs by status">
+          <option value="">All Statuses</option>
+          <option value="executing">Running</option>
+          <option value="ready">Ready</option>
+          <option value="queued">Queued</option>
+          <option value="complete">Completed</option>
+          <option value="error">Failed</option>
+        </select>
+      </div>
+      <div class="col-12 col-md-2">
+        <label for="sortBy" class="sr-only">Sort jobs by</label>
+        <select id="sortBy" class="form-control sjst-select"
+                ng-model="c.sortField"
+                ng-change="c.applySort()"
+                aria-label="Sort jobs by field">
+          <option value="name">Name</option>
+          <option value="state">Status</option>
+          <option value="next_action">Next Run</option>
+          <option value="last_run">Last Run</option>
+          <option value="avg_duration">Avg Duration</option>
+        </select>
+      </div>
+      <div class="col-12 col-md-2">
+        <button class="btn sjst-btn sjst-btn-sort-dir"
+                ng-click="c.toggleSortDir()"
+                aria-label="Sort direction: {{c.sortAsc ? 'Ascending' : 'Descending'}}"
+                tabindex="0">
+          <i class="fa" ng-class="c.sortAsc ? 'fa-sort-amount-asc' : 'fa-sort-amount-desc'" aria-hidden="true"></i>
+          {{c.sortAsc ? 'Asc' : 'Desc'}}
+        </button>
+      </div>
+    </div>
+    <div class="sjst-filter-info" ng-show="c.activeFilterLabel" role="status" aria-live="polite">
+      <span class="sjst-filter-badge">
+        <i class="fa fa-filter" aria-hidden="true"></i>
+        {{c.activeFilterLabel}}
+        <button class="sjst-filter-remove" ng-click="c.clearAllFilters()" aria-label="Clear all filters">
+          <i class="fa fa-times" aria-hidden="true"></i>
+        </button>
+      </span>
+      <span class="sjst-result-count">{{c.filteredJobs.length}} of {{c.allJobs.length}} jobs</span>
+    </div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div class="sjst-loading-overlay" ng-show="c.loading && !c.allJobs.length" role="alert" aria-live="assertive">
+    <div class="sjst-spinner-wrap">
+      <div class="sjst-spinner" aria-hidden="true"></div>
+      <p class="sjst-loading-msg">Loading scheduled jobs...</p>
+    </div>
+  </div>
+
+  <!-- No Results Message -->
+  <div class="sjst-no-results" ng-show="!c.loading && !c.filteredJobs.length" role="status">
+    <i class="fa fa-inbox sjst-no-results-icon" aria-hidden="true"></i>
+    <h3 class="sjst-no-results-title">No Jobs Found</h3>
+    <p class="sjst-no-results-text" ng-if="c.searchTerm || c.statusFilter">
+      No jobs match your current filters. Try adjusting your search criteria.
+    </p>
+    <p class="sjst-no-results-text" ng-if="!c.searchTerm && !c.statusFilter">
+      No scheduled jobs found in this instance.
+    </p>
+    <button class="btn sjst-btn sjst-btn-primary" ng-click="c.clearAllFilters()" ng-if="c.searchTerm || c.statusFilter">
+      Clear Filters
+    </button>
+  </div>
+
+  <!-- Job List Table -->
+  <div class="sjst-table-section" ng-show="c.filteredJobs.length">
+    <div class="sjst-table-responsive" role="region" aria-label="Scheduled jobs table" tabindex="0">
+      <table class="table sjst-table" role="grid" aria-label="Scheduled Jobs">
+        <thead>
+          <tr role="row">
+            <th scope="col" class="sjst-th sjst-th-expand" aria-label="Expand details"></th>
+            <th scope="col" class="sjst-th sjst-th-status"
+                ng-click="c.sortBy('state')" tabindex="0"
+                ng-keydown="c.handleSortKeydown($event, 'state')"
+                aria-sort="{{c.sortField === 'state' ? (c.sortAsc ? 'ascending' : 'descending') : 'none'}}">
+              Status <i class="fa" ng-class="c.getSortIcon('state')" aria-hidden="true"></i>
+            </th>
+            <th scope="col" class="sjst-th sjst-th-name"
+                ng-click="c.sortBy('name')" tabindex="0"
+                ng-keydown="c.handleSortKeydown($event, 'name')"
+                aria-sort="{{c.sortField === 'name' ? (c.sortAsc ? 'ascending' : 'descending') : 'none'}}">
+              Job Name <i class="fa" ng-class="c.getSortIcon('name')" aria-hidden="true"></i>
+            </th>
+            <th scope="col" class="sjst-th sjst-th-lastrun"
+                ng-click="c.sortBy('last_run')" tabindex="0"
+                ng-keydown="c.handleSortKeydown($event, 'last_run')">
+              Last Run <i class="fa" ng-class="c.getSortIcon('last_run')" aria-hidden="true"></i>
+            </th>
+            <th scope="col" class="sjst-th sjst-th-nextrun"
+                ng-click="c.sortBy('next_action')" tabindex="0"
+                ng-keydown="c.handleSortKeydown($event, 'next_action')">
+              Next Run <i class="fa" ng-class="c.getSortIcon('next_action')" aria-hidden="true"></i>
+            </th>
+            <th scope="col" class="sjst-th sjst-th-duration"
+                ng-click="c.sortBy('avg_duration')" tabindex="0"
+                ng-keydown="c.handleSortKeydown($event, 'avg_duration')">
+              Avg Duration <i class="fa" ng-class="c.getSortIcon('avg_duration')" aria-hidden="true"></i>
+            </th>
+            <th scope="col" class="sjst-th sjst-th-success">Success Rate</th>
+            <th scope="col" class="sjst-th sjst-th-actions">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <ng-container ng-repeat="job in c.filteredJobs track by job.sys_id">
+            <!-- Main Job Row -->
+            <tr class="sjst-row sjst-row-{{job.state_key}}"
+                ng-class="{'sjst-row-expanded': job.expanded}"
+                role="row">
+              <td class="sjst-td sjst-td-expand">
+                <button class="sjst-expand-btn"
+                        ng-click="c.toggleExpand(job)"
+                        ng-keydown="c.handleExpandKeydown($event, job)"
+                        aria-expanded="{{job.expanded}}"
+                        aria-label="{{job.expanded ? 'Collapse' : 'Expand'}} details for {{job.name}}"
+                        tabindex="0">
+                  <i class="fa" ng-class="job.expanded ? 'fa-chevron-down' : 'fa-chevron-right'" aria-hidden="true"></i>
+                </button>
+              </td>
+              <td class="sjst-td sjst-td-status">
+                <span class="sjst-status-badge sjst-status-{{job.state_key}}"
+                      role="status"
+                      aria-label="Status: {{job.state_display}}">
+                  <i class="fa {{job.state_icon}}" aria-hidden="true"></i>
+                  <span class="sjst-status-text">{{job.state_display}}</span>
+                </span>
+              </td>
+              <td class="sjst-td sjst-td-name">
+                <div class="sjst-job-name">{{job.name}}</div>
+                <div class="sjst-job-type" ng-if="job.run_type">
+                  <span class="sjst-type-badge">{{job.run_type}}</span>
+                </div>
+              </td>
+              <td class="sjst-td sjst-td-lastrun">
+                <span ng-if="job.last_run" title="{{job.last_run}}">{{job.last_run_display}}</span>
+                <span ng-if="!job.last_run" class="sjst-text-muted">Never</span>
+              </td>
+              <td class="sjst-td sjst-td-nextrun">
+                <span ng-if="job.next_action" title="{{job.next_action}}">{{job.next_action_display}}</span>
+                <span ng-if="!job.next_action" class="sjst-text-muted">N/A</span>
+              </td>
+              <td class="sjst-td sjst-td-duration">
+                <span ng-if="job.avg_duration">{{job.avg_duration_display}}</span>
+                <span ng-if="!job.avg_duration" class="sjst-text-muted">—</span>
+              </td>
+              <td class="sjst-td sjst-td-success">
+                <div class="sjst-success-bar-wrap" ng-if="job.success_rate !== null">
+                  <div class="sjst-success-bar">
+                    <div class="sjst-success-bar-fill"
+                         ng-class="{'sjst-rate-good': job.success_rate >= 90, 'sjst-rate-warn': job.success_rate >= 50 && job.success_rate < 90, 'sjst-rate-bad': job.success_rate < 50}"
+                         ng-style="{'width': job.success_rate + '%'}"
+                         role="progressbar"
+                         aria-valuenow="{{job.success_rate}}"
+                         aria-valuemin="0"
+                         aria-valuemax="100"
+                         aria-label="Success rate: {{job.success_rate}}%">
+                    </div>
+                  </div>
+                  <span class="sjst-success-pct">{{job.success_rate}}%</span>
+                </div>
+                <span ng-if="job.success_rate === null" class="sjst-text-muted">—</span>
+              </td>
+              <td class="sjst-td sjst-td-actions">
+                <div class="sjst-action-btns">
+                  <button class="btn sjst-action-btn sjst-action-run"
+                          ng-click="c.triggerJob(job)"
+                          ng-disabled="job.state_key === 'executing' || !c.isAdmin"
+                          ng-if="c.isAdmin"
+                          title="Execute job now"
+                          aria-label="Execute {{job.name}} now"
+                          tabindex="0">
+                    <i class="fa fa-play" aria-hidden="true"></i>
+                  </button>
+                  <button class="btn sjst-action-btn sjst-action-cancel"
+                          ng-click="c.cancelJob(job)"
+                          ng-disabled="job.state_key !== 'executing' || !c.isAdmin"
+                          ng-if="c.isAdmin && job.state_key === 'executing'"
+                          title="Cancel running job"
+                          aria-label="Cancel {{job.name}}"
+                          tabindex="0">
+                    <i class="fa fa-stop" aria-hidden="true"></i>
+                  </button>
+                  <button class="btn sjst-action-btn sjst-action-view"
+                          ng-click="c.viewJobRecord(job)"
+                          title="View job record"
+                          aria-label="View record for {{job.name}}"
+                          tabindex="0">
+                    <i class="fa fa-external-link" aria-hidden="true"></i>
+                  </button>
+                </div>
+              </td>
+            </tr>
+
+            <!-- Expandable Detail Row -->
+            <tr class="sjst-detail-row" ng-if="job.expanded" role="row">
+              <td colspan="8" class="sjst-detail-cell">
+                <div class="sjst-detail-panel">
+                  <!-- Detail Loading -->
+                  <div class="sjst-detail-loading" ng-if="job.detailLoading">
+                    <i class="fa fa-spinner fa-spin" aria-hidden="true"></i> Loading details...
+                  </div>
+
+                  <div ng-if="!job.detailLoading" class="sjst-detail-content">
+                    <!-- Job Configuration -->
+                    <div class="row">
+                      <div class="col-12 col-md-6">
+                        <h3 class="sjst-detail-heading">Job Configuration</h3>
+                        <dl class="sjst-detail-list">
+                          <dt>Job ID</dt>
+                          <dd>{{job.sys_id}}</dd>
+                          <dt>Run Type</dt>
+                          <dd>{{job.run_type || 'N/A'}}</dd>
+                          <dt>Active</dt>
+                          <dd>
+                            <span class="sjst-active-badge" ng-class="job.active ? 'sjst-active-yes' : 'sjst-active-no'">
+                              {{job.active ? 'Yes' : 'No'}}
+                            </span>
+                          </dd>
+                          <dt>Run Start</dt>
+                          <dd>{{job.run_start || 'N/A'}}</dd>
+                          <dt>Run Time</dt>
+                          <dd>{{job.run_time || 'N/A'}}</dd>
+                          <dt>Created</dt>
+                          <dd>{{job.sys_created_on || 'N/A'}}</dd>
+                        </dl>
+                      </div>
+                      <div class="col-12 col-md-6">
+                        <h3 class="sjst-detail-heading">Execution Statistics (7 Days)</h3>
+                        <dl class="sjst-detail-list">
+                          <dt>Total Executions</dt>
+                          <dd>{{job.execution_count || 0}}</dd>
+                          <dt>Successful</dt>
+                          <dd class="sjst-text-success">{{job.success_count || 0}}</dd>
+                          <dt>Failed</dt>
+                          <dd class="sjst-text-error">{{job.failure_count || 0}}</dd>
+                          <dt>Average Duration</dt>
+                          <dd>{{job.avg_duration_display || 'N/A'}}</dd>
+                          <dt>Success Rate</dt>
+                          <dd>{{job.success_rate !== null ? job.success_rate + '%' : 'N/A'}}</dd>
+                          <dt>Last Error</dt>
+                          <dd class="sjst-text-error">{{job.last_error || 'None'}}</dd>
+                        </dl>
+                      </div>
+                    </div>
+
+                    <!-- Error Details (for failed jobs) -->
+                    <div class="sjst-error-section" ng-if="job.error_logs && job.error_logs.length">
+                      <h3 class="sjst-detail-heading sjst-detail-heading-error">
+                        <i class="fa fa-exclamation-triangle" aria-hidden="true"></i>
+                        Error Logs (Last 24 Hours)
+                      </h3>
+                      <div class="sjst-error-list">
+                        <div class="sjst-error-item" ng-repeat="err in job.error_logs track by $index">
+                          <div class="sjst-error-header">
+                            <span class="sjst-error-level sjst-error-level-{{err.level}}">{{err.level}}</span>
+                            <span class="sjst-error-time">{{err.created_on}}</span>
+                          </div>
+                          <pre class="sjst-error-message">{{err.message}}</pre>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Execution History -->
+                    <div class="sjst-history-section" ng-if="job.execution_history && job.execution_history.length">
+                      <h3 class="sjst-detail-heading">Recent Execution History</h3>
+                      <div class="sjst-history-table-wrap">
+                        <table class="table sjst-history-table" aria-label="Execution history for {{job.name}}">
+                          <thead>
+                            <tr>
+                              <th scope="col">Time</th>
+                              <th scope="col">State</th>
+                              <th scope="col">Result</th>
+                              <th scope="col">Duration</th>
+                              <th scope="col">Message</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr ng-repeat="exec in job.execution_history track by exec.sys_id">
+                              <td>{{exec.created_on}}</td>
+                              <td>
+                                <span class="sjst-mini-badge sjst-mini-{{exec.state_key}}">{{exec.state}}</span>
+                              </td>
+                              <td>{{exec.result || '—'}}</td>
+                              <td>{{exec.duration_display || '—'}}</td>
+                              <td class="sjst-history-msg">{{exec.message || '—'}}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <!-- Dependencies -->
+                    <div class="sjst-deps-section" ng-if="job.dependencies && job.dependencies.length">
+                      <h3 class="sjst-detail-heading">Dependencies & Related Records</h3>
+                      <div class="sjst-dep-chips">
+                        <span class="sjst-dep-chip" ng-repeat="dep in job.dependencies track by $index">
+                          <i class="fa fa-link" aria-hidden="true"></i> {{dep.name}} ({{dep.type}})
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </ng-container>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    <div class="sjst-pagination" ng-if="c.totalPages > 1" role="navigation" aria-label="Job list pagination">
+      <button class="btn sjst-page-btn"
+              ng-disabled="c.currentPage <= 1"
+              ng-click="c.goToPage(c.currentPage - 1)"
+              aria-label="Previous page" tabindex="0">
+        <i class="fa fa-chevron-left" aria-hidden="true"></i>
+      </button>
+      <span class="sjst-page-info">
+        Page {{c.currentPage}} of {{c.totalPages}}
+      </span>
+      <button class="btn sjst-page-btn"
+              ng-disabled="c.currentPage >= c.totalPages"
+              ng-click="c.goToPage(c.currentPage + 1)"
+              aria-label="Next page" tabindex="0">
+        <i class="fa fa-chevron-right" aria-hidden="true"></i>
+      </button>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="sjst-toast" ng-class="{'sjst-toast-show': c.toast.show, 'sjst-toast-success': c.toast.type === 'success', 'sjst-toast-error': c.toast.type === 'error', 'sjst-toast-info': c.toast.type === 'info'}"
+       role="alert" aria-live="assertive">
+    <i class="fa" ng-class="{'fa-check-circle': c.toast.type === 'success', 'fa-exclamation-circle': c.toast.type === 'error', 'fa-info-circle': c.toast.type === 'info'}" aria-hidden="true"></i>
+    <span>{{c.toast.message}}</span>
+    <button class="sjst-toast-close" ng-click="c.toast.show = false" aria-label="Dismiss notification">
+      <i class="fa fa-times" aria-hidden="true"></i>
+    </button>
+  </div>
+</div>]]></template>
+<u_search_keys/>
+</sp_widget>
+</unload>
