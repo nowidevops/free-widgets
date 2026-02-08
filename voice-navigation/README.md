@@ -99,7 +99,7 @@ The update set contains:
 
 ## Author
 
-**iDevOpsLLC**
+**iDevOpsLLC** | [YouTube - @AgenticServiceNow](https://www.youtube.com/@AgenticServiceNow)
 
 ## License
 
